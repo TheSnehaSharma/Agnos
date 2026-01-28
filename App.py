@@ -1,134 +1,167 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration
 import face_recognition
 import cv2
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import av
+import threading
 import os
 
-# --- SHARED CONFIGURATION ---
 RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+LOG_FILE = "attendance_log.csv"
 
-# Initialize Session State
 if 'database' not in st.session_state:
     st.session_state.database = {"encodings": [], "names": []}
-if 'attendance_log' not in st.session_state:
-    st.session_state.attendance_log = pd.DataFrame(columns=["Name", "Date", "Time"])
+
+if not os.path.exists(LOG_FILE):
+    pd.DataFrame(columns=["Name", "Date", "Time"]).to_csv(LOG_FILE, index=False)
 
 # --- PAGE 1: REGISTRATION ---
 def registration_page():
     st.title("👤 User Registration")
-    st.markdown("Use the form below to add a new person to the system. The data is processed only when you click **Submit**.")
+    st.info("Upload a photo to register a new user.")
     
     with st.form("registration_form", clear_on_submit=True):
         name = st.text_input("Enter Full Name")
-        upload = st.file_uploader("Upload Clear Face Photo", type=['jpg', 'png', 'jpeg'])
-        submit_button = st.form_submit_button("Register & Encode Face")
+        upload = st.file_uploader("Upload Face Photo", type=['jpg', 'png', 'jpeg'])
+        submit = st.form_submit_button("Register")
 
-        if submit_button:
+        if submit:
             if name and upload:
                 try:
-
+        
                     file_bytes = np.asarray(bytearray(upload.read()), dtype=np.uint8)
                     img = cv2.imdecode(file_bytes, 1)
                     rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+                
                     encodes = face_recognition.face_encodings(rgb_img)
+
                     if encodes:
+
                         st.session_state.database["encodings"].append(encodes[0])
                         st.session_state.database["names"].append(name.upper())
-                        st.success(f"✅ Successfully registered {name.upper()}!")
+                        st.success(f"✅ Registered {name.upper()} successfully!")
                     else:
-                        st.error("❌ Could not find a face in that photo. Try again.")
+                        st.error("❌ No face detected. Please upload a clearer photo.")
                 except Exception as e:
-                    st.error(f"Error processing image: {e}")
+                    st.error(f"Error: {e}")
             else:
-                st.warning("⚠️ Both Name and Image are required.")
+                st.warning("⚠️ Name and Image are required.")
 
-    with st.expander("📂 View Registered Users"):
-        if st.session_state.database["names"]:
-            st.write(", ".join(st.session_state.database["names"]))
-        else:
-            st.info("No users registered yet.")
+    
+    if st.session_state.database["names"]:
+        st.write("### Registered Users:")
+        st.write(", ".join(st.session_state.database["names"]))
 
 # --- PAGE 2: LIVE FEED ---
-class FaceProcessor(VideoTransformerBase):
-    def transform(self, frame):
+class VideoProcessor:
+    def __init__(self):
+        
+        self.known_encodings = st.session_state.database["encodings"]
+        self.known_names = st.session_state.database["names"]
+        self.frame_count = 0 
+        self.last_detected = None
+
+    def recv(self, frame):
+        
         img = frame.to_ndarray(format="bgr24")
-        if not st.session_state.database["encodings"]:
-            return img
-
-        img_small = cv2.resize(img, (0, 0), None, 0.25, 0.25)
-        face_locs = face_recognition.face_locations(img_small)
-        face_encodes = face_recognition.face_encodings(img_small, face_locs)
-
-        for encodeFace, faceLoc in zip(face_encodes, face_locs):
-
-            face_distances = face_recognition.face_distance(st.session_state.database["encodings"], encodeFace)
-            match_index = np.argmin(face_distances)
-            distance = face_distances[match_index]
+        
+        
+        self.frame_count += 1
+        
+        if self.known_encodings: 
             
+           
+            img_small = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
+            rgb_small = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
+            
+            
+            face_locs = face_recognition.face_locations(rgb_small)
+            face_encodes = face_recognition.face_encodings(rgb_small, face_locs)
 
-            if distance < 0.6:
-                name = st.session_state.database["names"][match_index]
-                match_perc = round((1 - distance) * 100, 1)
-                color = (0, 255, 0)
+            for encodeFace, faceLoc in zip(face_encodes, face_locs):
+                matches = face_recognition.compare_faces(self.known_encodings, encodeFace)
+                face_dis = face_recognition.face_distance(self.known_encodings, encodeFace)
                 
-                now = datetime.now()
-                new_entry = {"Name": name, "Date": now.strftime("%Y-%m-%d"), "Time": now.strftime("%H:%M:%S")}
-
-                if not ((st.session_state.attendance_log['Name'] == name) & 
-                        (st.session_state.attendance_log['Date'] == new_entry['Date'])).any():
-                    st.session_state.attendance_log = pd.concat([st.session_state.attendance_log, pd.DataFrame([new_entry])], ignore_index=True)
-            else:
+                match_index = np.argmin(face_dis)
                 name = "UNKNOWN"
-                match_perc = 0
                 color = (0, 0, 255)
 
-            y1, x2, y2, x1 = [v*4 for v in faceLoc]
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(img, f"{name} {match_perc}%", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
-        return img
+                if matches[match_index] and face_dis[match_index] < 0.50:
+                    name = self.known_names[match_index]
+                    color = (0, 255, 0) # Green
+                    
+                    
+                    now = datetime.now()
+                    current_date = now.strftime("%Y-%m-%d")
+                    current_time = now.strftime("%H:%M:%S")
+                    
+                
+                    try:
+                        with open(LOG_FILE, "a") as f:
+                             
+                             f.write(f"{name},{current_date},{current_time}\n")
+                    except:
+                        pass
+
+                
+                y1, x2, y2, x1 = faceLoc
+                y1, x2, y2, x1 = y1*4, x2*4, y2*4, x1*4
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(img, name, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def live_feed_page():
-    st.title("📷 Live Attendance Feed")
+    st.title("📷 Live Attendance")
+    
     if not st.session_state.database["names"]:
-        st.warning("No faces registered. Please go to the Registration page first.")
+        st.warning("Please register a face first.")
+        return
+
+    st.markdown("**Note:** Detection runs every few frames to maintain performance.")
     
     webrtc_streamer(
-        key="attendance-stream",
-        video_transformer_factory=FaceProcessor,
+        key="attendance",
+        video_processor_factory=VideoProcessor,
         rtc_configuration=RTC_CONFIG,
         media_stream_constraints={"video": True, "audio": False}
     )
 
-# --- PAGE 3: ATTENDANCE LOGS ---
+# --- PAGE 3: DATA & LOGS ---
 def attendance_page():
-    st.title("📋 Attendance Records")
+    st.title("📋 Attendance Logs")
     
-    if st.session_state.attendance_log.empty:
-        st.info("No attendance records found yet.")
+    if os.path.exists(LOG_FILE):
+        
+        try:
+            df = pd.read_csv(LOG_FILE, names=["Name", "Date", "Time"])
+            df = df[df["Name"] != "Name"] 
+        except:
+            df = pd.DataFrame(columns=["Name", "Date", "Time"])
     else:
-        st.dataframe(st.session_state.attendance_log, use_container_width=True)
-        
-        csv = st.session_state.attendance_log.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Attendance as CSV",
-            data=csv,
-            file_name=f"attendance_{datetime.now().strftime('%Y-%m-%d')}.csv",
-            mime="text/csv",
-        )
-        
-        if st.button("🗑️ Clear Logs"):
-            st.session_state.attendance_log = pd.DataFrame(columns=["Name", "Date", "Time"])
-            st.rerun()
+        df = pd.DataFrame(columns=["Name", "Date", "Time"])
+
+    st.dataframe(df, use_container_width=True)
+
+    if not df.empty:
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download CSV", csv, "attendance.csv", "text/csv")
+    
+    if st.button("🗑️ Clear Logs"):
+        pd.DataFrame(columns=["Name", "Date", "Time"]).to_csv(LOG_FILE, index=False)
+        st.rerun()
 
 # --- NAVIGATION ---
 pg = st.navigation({
-    "Manage": [st.Page(registration_page, title="Register Face", icon="👤")],
-    "Live": [st.Page(live_feed_page, title="Live Feed", icon="📷")],
-    "Data": [st.Page(attendance_page, title="View Attendance", icon="📋")]
+    "System": [
+        st.Page(registration_page, title="Register", icon="👤"),
+        st.Page(live_feed_page, title="Live Camera", icon="📹"),
+        st.Page(attendance_page, title="View Logs", icon="📄")
+    ]
 })
+
 pg.run()
