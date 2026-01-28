@@ -3,3 +3,5 @@ streamlit-webrtc
 face_recognition
 opencv-python-headless
 numpy
+pandas
+av
