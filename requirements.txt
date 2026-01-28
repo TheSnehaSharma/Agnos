@@ -1,3 +1,4 @@
+streamlit
 streamlit-webrtc
 face_recognition
 opencv-python-headless
