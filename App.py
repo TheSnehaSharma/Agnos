@@ -189,3 +189,31 @@ elif page == "Live Feed":
     
     # 1. Capture via URL Bridge
     detected_name = st.query_params.get("detected")
+    
+    with col_v:
+        st.components.v1.html(get_component_html(), height=420)
+    
+    with col_m:
+        st.subheader("Attendance Status")
+        if detected_name and detected_name != "Unknown":
+            st.success(f"Recognized: {detected_name}")
+            
+            # --- LOGGING ---
+            if detected_name not in st.session_state.logged_set:
+                save_attendance_pkl(detected_name)
+                st.session_state.logged_set.add(detected_name)
+                st.toast(f"✅ {detected_name} saved to pickle!")
+        else:
+            st.info("Scanning...")
+
+elif page == "Log":
+    st.header("📊 Attendance Log")
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG, "rb") as f: logs = pickle.load(f)
+        st.table(pd.DataFrame(logs))
+        if st.button("🗑️ Reset Logs"):
+            os.remove(PKL_LOG)
+            st.session_state.logged_set = set()
+            st.rerun()
+    else:
+        st.info("No logs found.")
