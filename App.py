@@ -23,13 +23,12 @@ if "logs" not in st.session_state:
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
 # --- FRONTEND CODE ---
-# Corrected CDN URLs for MediaPipe 0.10.3
+# Using unpkg and a storage-neutral initialization
 INTERFACE_CODE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs" type="module"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js"></script>
+    <script src="https://unpkg.com/@mediapipe/tasks-vision@0.10.3/vision_bundle.js" crossorigin="anonymous"></script>
     <style>
         body { margin:0; background: #0e1117; color: #00FF00; font-family: monospace; }
         #view { position: relative; width: 100%; height: 400px; border-radius: 12px; overflow: hidden; background: #000; border: 1px solid #333; }
@@ -39,7 +38,7 @@ INTERFACE_CODE = """
 </head>
 <body>
     <div id="view">
-        <div id="status-bar">STATUS: Checking Google AI Engine...</div>
+        <div id="status-bar">CONNECTING TO GOOGLE AI...</div>
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="overlay"></canvas>
     </div>
@@ -55,18 +54,18 @@ INTERFACE_CODE = """
             const visionLib = window.tasksVision;
             
             if (!visionLib) {
-                log.innerText = "ERROR: CDN blocked or file not found. Try disabling Ad-Block.";
+                log.innerText = "ERROR: Browser blocked AI scripts. Disable 'Tracking Prevention' or Ad-Block.";
                 log.style.color = "#FF4B4B";
                 return;
             }
 
             try {
-                log.innerText = "STATUS: Connecting to WASM... (Wait 5-10s)";
+                log.innerText = "LOADING: Resolving WASM Modules...";
                 const vision = await visionLib.FilesetResolver.forVisionTasks(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                    "https://unpkg.com/@mediapipe/tasks-vision@0.10.3/wasm"
                 );
                 
-                log.innerText = "STATUS: Fetching Face Model...";
+                log.innerText = "LOADING: Fetching Official Face Model...";
                 faceLandmarker = await visionLib.FaceLandmarker.createFromOptions(vision, {
                     baseOptions: {
                         modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
@@ -76,12 +75,12 @@ INTERFACE_CODE = """
                     numFaces: 1
                 });
 
-                log.innerText = "STATUS: Requesting Webcam...";
+                log.innerText = "PERMISSION: Accessing Camera...";
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
                 
                 video.onloadeddata = () => {
-                    log.innerText = "ONLINE: Privacy-Focused Scanner Active";
+                    log.innerText = "ONLINE: Privacy Mode Active (Local Encoding)";
                     predict();
                 };
             } catch (err) {
@@ -94,8 +93,7 @@ INTERFACE_CODE = """
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             
-            const startTimeMs = performance.now();
-            const results = faceLandmarker.detectForVideo(video, startTimeMs);
+            const results = faceLandmarker.detectForVideo(video, performance.now());
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (results.faceLandmarks && results.faceLandmarks.length > 0) {
@@ -109,7 +107,7 @@ INTERFACE_CODE = """
                 ctx.lineWidth = 3;
                 ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
                 
-                // Privacy: Encoded landmarks only
+                // Privacy: Encode within browser, send only landmarks
                 window.parent.postMessage({
                     type: "streamlit:setComponentValue",
                     value: JSON.stringify(landmarks)
@@ -134,20 +132,20 @@ if page == "Register":
     
     if val and isinstance(val, str):
         st.session_state.buffered_encoding = val
-        st.success(f"✅ Recognition Ready for {name}")
+        st.success(f"✅ Data Captured for {name}")
     
     if st.button("Confirm Registration"):
         if name and st.session_state.get('buffered_encoding'):
             st.session_state.db[name] = json.loads(st.session_state.buffered_encoding)
             with open(DB_FILE, "w") as f:
                 json.dump(st.session_state.db, f)
-            st.success(f"Saved {name}!")
+            st.success(f"Successfully saved {name} to Database!")
             st.rerun()
         else:
             st.error("Ensure name is entered and face is detected.")
 
 elif page == "Live Feed":
-    st.header("📹 Attendance Feed")
+    st.header("📹 Attendance Scanner")
     col1, col2 = st.columns([3, 1])
     with col1:
         feed_val = st.components.v1.html(INTERFACE_CODE, height=420)
@@ -155,6 +153,8 @@ elif page == "Live Feed":
         if feed_val and isinstance(feed_val, str):
             current_face = json.loads(feed_val)
             identified = "Unknown"
+            
+            # Efficient comparison logic
             for db_name, saved_face in st.session_state.db.items():
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
@@ -162,13 +162,15 @@ elif page == "Live Feed":
                 if dist < 0.05:
                     identified = db_name
                     break
+            
             st.subheader(f"Status: {identified}")
-            if identified != "Unknown" and identified not in st.session_state.logs["Name"].values:
-                now = datetime.now().strftime("%H:%M:%S")
-                new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
-                st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
-                st.session_state.logs.to_csv(LOG_FILE, index=False)
-                st.toast(f"Logged {identified}")
+            if identified != "Unknown":
+                if identified not in st.session_state.logs["Name"].values:
+                    now = datetime.now().strftime("%H:%M:%S")
+                    new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
+                    st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
+                    st.session_state.logs.to_csv(LOG_FILE, index=False)
+                    st.toast(f"Marked attendance for {identified}")
 
 elif page == "Log":
     st.header("📊 History")
