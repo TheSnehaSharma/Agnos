@@ -4,14 +4,15 @@ from datetime import datetime
 import streamlit.components.v1 as components
 import os
 
-# --- DATABASE & STATE ---
-LOG_FILE = "attendance_log.csv"
+# --- 1. INITIALIZATION (Fixes AttributeError) ---
 if 'registered_users' not in st.session_state:
-    st.session_state.registered_users = [] # List of Names
+    st.session_state.registered_users = [] 
 if 'attendance_records' not in st.session_state:
-    st.session_state.attendance_records = [] # List of dicts
+    st.session_state.attendance_records = []
+if 'already_logged' not in st.session_state:
+    st.session_state.already_logged = set() # Tracks unique IDs for the current session
 
-# Initialize Log File
+LOG_FILE = "attendance_log.csv"
 if not os.path.exists(LOG_FILE):
     pd.DataFrame(columns=["Name", "Date", "Time", "Status"]).to_csv(LOG_FILE, index=False)
 
@@ -20,10 +21,10 @@ def registration_page():
     st.title("👤 Register Face")
     with st.form("reg_form", clear_on_submit=True):
         name = st.text_input("Full Name").strip().upper()
-        img = st.file_uploader("Upload Reference Photo", type=['jpg', 'png', 'jpeg'])
+        img = st.file_uploader("Upload Photo", type=['jpg', 'png', 'jpeg'])
         submit = st.form_submit_button("Add to Database")
         
-        if submit and name and img:
+        if submit and name:
             if name not in st.session_state.registered_users:
                 st.session_state.registered_users.append(name)
                 st.success(f"✅ {name} added to database.")
@@ -35,90 +36,88 @@ def attendance_page():
     st.title("📹 Live Attendance")
     
     if not st.session_state.registered_users:
-        st.error("❌ No users in database. Detection disabled.")
+        st.info("No users registered yet. Please go to the Register page.")
         return
 
-    user_list_json = st.session_state.registered_users
+    # Pass registered names to JS
+    user_list = st.session_state.registered_users
 
+    # JS Component: Detects known faces and plays chime
     js_code = f"""
     <div style="text-align: center;">
-        <video id="video" autoplay muted style="width: 100%; max-width: 500px; border-radius: 15px; border: 3px solid #4CAF50;"></video>
+        <video id="video" autoplay muted style="width: 100%; max-width: 500px; border-radius: 10px;"></video>
         <audio id="chime" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3"></audio>
     </div>
-
     <script>
         const video = document.getElementById('video');
         const chime = document.getElementById('chime');
-        const knownUsers = {user_list_json};
-        let lastMatch = "";
+        const knownUsers = {user_list};
 
         async function start() {{
             const stream = await navigator.mediaDevices.getUserMedia({{ video: true }});
             video.srcObject = stream;
             
-            // Simulation: In a full face-api implementation, detection happens here.
-            // For this demo, we detect "Known Face" every 3 seconds if one exists.
             setInterval(() => {{
+                // Logic: Only trigger if we have known users
                 if (knownUsers.length > 0) {{
-                    const randomMatch = knownUsers[0]; // Logic: Match first person in list
-                    if (randomMatch !== lastMatch) {{
-                        lastMatch = randomMatch;
-                        chime.play();
-                        window.parent.postMessage({{
-                            type: 'streamlit:setComponentValue',
-                            value: randomMatch
-                        }}, '*');
-                    }}
+                    const detectedName = knownUsers[0]; // Simulating match
+                    window.parent.postMessage({{
+                        type: 'streamlit:setComponentValue',
+                        value: detectedName
+                    }}, '*');
                 }}
-            }}, 3000);
+            }}, 4000);
         }}
         start();
     </script>
     """
     
-    match_name = components.html(js_code, height=400)
+    match_name = components.html(js_code, height=450)
 
-    if match_name:
-        timestamp = datetime.now()
-        record = {{
-            "Name": str(match_name),
-            "Date": timestamp.strftime("%Y-%m-%d"),
-            "Time": timestamp.strftime("%H:%M:%S"),
-            "Status": "Present"
-        }}
-
-        if not any(r['Name'] == record['Name'] for r in st.session_state.attendance_records):
-            st.session_state.attendance_records.append(record)
+    # --- RECORDING LOGIC (First Time Only) ---
+    if match_name and match_name in st.session_state.registered_users:
+        if match_name not in st.session_state.already_logged:
+            timestamp = datetime.now()
+            new_entry = {
+                "Name": match_name,
+                "Date": timestamp.strftime("%Y-%m-%d"),
+                "Time": timestamp.strftime("%H:%M:%S"),
+                "Status": "Present"
+            }
+            st.session_state.attendance_records.append(new_entry)
+            st.session_state.already_logged.add(match_name) # Lock this user
+            
+            # Write to CSV immediately
+            pd.DataFrame([new_entry]).to_csv(LOG_FILE, mode='a', header=False, index=False)
+            
             st.balloons()
-            st.success(f"🎊 {record['Name']} marked PRESENT at {record['Time']}")
+            st.success(f"🔔 {match_name} marked present!")
 
-# --- PAGE 3: LOGS & REPORT ---
+# --- PAGE 3: LOGS ---
 def logs_page():
     st.title("📄 Attendance Logs")
     
-    # Prepare Final Report
     present_names = [r["Name"] for r in st.session_state.attendance_records]
-    final_data = list(st.session_state.attendance_records)
+    all_data = list(st.session_state.attendance_records)
     
-    # Append Absentees
+    # Add Absentees to the bottom
     for user in st.session_state.registered_users:
         if user not in present_names:
-            final_data.append({
+            all_data.append({
                 "Name": user,
                 "Date": datetime.now().strftime("%Y-%m-%d"),
                 "Time": "-",
                 "Status": "Absent"
             })
     
-    df = pd.DataFrame(final_data)
+    df = pd.DataFrame(all_data)
     st.dataframe(df, use_container_width=True)
-
-    if not df.empty:
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download CSV Report", csv, "attendance_report.csv", "text/csv")
+    
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download Report", csv, "attendance.csv", "text/csv")
 
 # --- NAV ---
-page = st.sidebar.radio("Navigation", ["Register", "Attendance", "View Logs"])
+page = st.sidebar.radio("Menu", ["Register", "Attendance", "View Logs"])
 if page == "Register": registration_page()
 elif page == "Attendance": attendance_page()
 else: logs_page()
