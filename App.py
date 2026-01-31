@@ -25,18 +25,19 @@ if 'attendance_records' not in st.session_state:
 # --- 2. REGISTRATION PAGE ---
 def registration_page():
     st.title("👤 Local Face Registration")
-    st.info("Face encoding happens entirely in your browser. No images are sent to the server.")
     
     col1, col2 = st.columns(2)
     with col1:
         name = st.text_input("Enter Full Name").strip().upper()
         img_file = st.file_uploader("Upload Profile Photo", type=['jpg', 'png', 'jpeg'])
     
+    # Hidden placeholder for the AI result
     if img_file and name:
-        img_base64 = base64.b64encode(img_file.read()).decode()
+        img_bytes = img_file.read()
+        img_base64 = base64.b64encode(img_bytes).decode()
         
         raw_js_reg = """
-        <div id="status" style="font-family:sans-serif; color:#ff4b4b; font-weight:bold;">🧬 AI Engine Loading...</div>
+        <div id="status" style="font-family:sans-serif; color:#ff4b4b; font-weight:bold; padding:10px; border:1px solid #eee; border-radius:5px;">🧬 AI Engine Loading...</div>
         <script src="FACE_API_URL"></script>
         <script>
             async function process() {
@@ -46,7 +47,7 @@ def registration_page():
                     await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
                     await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
                     
-                    document.getElementById('status').innerText = "Processing Image...";
+                    document.getElementById('status').innerText = "Processing Image... Stay on this page.";
                     const img = new Image();
                     img.src = "data:image/jpeg;base64,IMG_DATA";
                     img.onload = async () => {
@@ -56,44 +57,51 @@ def registration_page():
                                 type: 'streamlit:setComponentValue', 
                                 value: { "name": "USER_NAME", "encoding": Array.from(det.descriptor) }
                             }, '*');
-                            document.getElementById('status').innerText = "✅ Done! Mapping received.";
+                            document.getElementById('status').innerText = "✅ Extraction Complete! Click 'Confirm Registration' below.";
                         } else {
                             document.getElementById('status').innerText = "❌ Error: No face detected.";
                         }
                     };
-                } catch (e) { document.getElementById('status').innerText = "❌ Load Error."; }
+                } catch (e) { document.getElementById('status').innerText = "❌ Model Load Error."; }
             }
             process();
         </script>
         """
         js_component = raw_js_reg.replace("FACE_API_URL", FACE_API_JS).replace("IMG_DATA", img_base64).replace("USER_NAME", name)
-        reg_result = st.components.v1.html(js_component, height=50)
+        reg_data = st.components.v1.html(js_component, height=100)
 
-        if reg_result and isinstance(reg_result, dict):
-            # Verify and Save
-            if not any(u['name'] == reg_result['name'] for u in st.session_state.registered_users):
-                st.session_state.registered_users.append(reg_result)
-                with open(DB_FILE, "w") as f:
-                    json.dump(st.session_state.registered_users, f)
-                st.success(f"Successfully registered {name}!")
-                st.balloons()
+        # Show the actual Register button only after AI returns data
+        if reg_data and isinstance(reg_data, dict):
+            if st.button(f"Confirm Registration for {name}"):
+                if not any(u['name'] == reg_data['name'] for u in st.session_state.registered_users):
+                    st.session_state.registered_users.append(reg_data)
+                    with open(DB_FILE, "w") as f:
+                        json.dump(st.session_state.registered_users, f)
+                    st.success(f"Successfully registered {name}!")
+                    st.rerun()
+
+    st.write("---")
+    st.subheader("Recently Registered Users")
+    if st.session_state.registered_users:
+        # Show last 10 registered
+        recent_df = pd.DataFrame(st.session_state.registered_users).tail(10)
+        st.table(recent_df[['name']])
+    else:
+        st.info("No users registered yet.")
 
 # --- 3. ATTENDANCE PAGE ---
 def attendance_page():
     st.title("📹 Live Presence Scanner")
     
-    # Show status but don't stop the feed
-    if not st.session_state.registered_users:
-        st.warning("⚠️ No users registered. Showing feed in 'Detection Only' mode.")
-    
-    known_json = json.dumps(st.session_state.registered_users)
+    # Ensure variables exist even if empty
+    known_json = json.dumps(st.session_state.registered_users) if st.session_state.registered_users else "[]"
 
     raw_js_attendance = """
     <div style="position: relative; display: inline-block;">
-        <video id="v" autoplay muted playsinline style="width: 100%; max-width: 600px; border-radius: 10px;"></video>
+        <video id="v" autoplay muted playsinline style="width: 100%; max-width: 600px; border-radius: 10px; background:#000;"></video>
         <canvas id="c" style="position: absolute; top: 0; left: 0;"></canvas>
     </div>
-    <p id="msg" style="font-family:sans-serif; color: #666;">Starting Privacy-Safe Scanner...</p>
+    <p id="msg" style="font-family:sans-serif; color: #666; margin-top:10px;">Initializing Camera...</p>
 
     <script src="FACE_API_URL"></script>
     <script>
@@ -103,29 +111,35 @@ def attendance_page():
         const known = KNOWN_DATA_JSON;
 
         async function start() {
-            const URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
-            await faceapi.nets.tinyFaceDetector.loadFromUri(URL);
-            await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
-            await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
+            try {
+                const URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
+                // Load faster models for live feed
+                await faceapi.nets.tinyFaceDetector.loadFromUri(URL);
+                await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
+                await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
 
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-            v.srcObject = stream;
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                v.srcObject = stream;
 
-            v.onloadedmetadata = () => {
-                c.width = v.videoWidth;
-                c.height = v.videoHeight;
-                m.innerText = "🔒 Scanner Active (Edge Processing)";
-                run();
-            };
+                v.onloadedmetadata = () => {
+                    c.width = v.videoWidth;
+                    c.height = v.videoHeight;
+                    m.innerText = "🔒 Scanner Active (0.5 Tolerance)";
+                    run();
+                };
+            } catch(e) { 
+                m.innerText = "Error: " + e.message; 
+                console.error(e);
+            }
         }
 
         async function run() {
-            // Create matcher only if users exist, otherwise default to empty
-            const labels = known.length > 0 
-                ? known.map(u => new faceapi.LabeledFaceDescriptors(u.name, [new Float32Array(u.encoding)]))
-                : [new faceapi.LabeledFaceDescriptors("Unknown", [new Float32Array(128).fill(0)])];
-            
-            const matcher = new faceapi.FaceMatcher(labels, 0.5); // 0.5 Tolerance as requested
+            // Setup matcher
+            let faceMatcher;
+            if (known.length > 0) {
+                const labels = known.map(u => new faceapi.LabeledFaceDescriptors(u.name, [new Float32Array(u.encoding)]));
+                faceMatcher = new faceapi.FaceMatcher(labels, 0.5);
+            }
 
             setInterval(async () => {
                 const detections = await faceapi.detectAllFaces(v, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptors();
@@ -136,33 +150,35 @@ def attendance_page():
                 ctx.clearRect(0, 0, c.width, c.height);
 
                 resized.forEach(d => {
-                    const match = matcher.findBestMatch(d.descriptor);
-                    
-                    // Calculate Match Percentage
-                    // Distance 0 = 100% match. Distance 0.5 = 50% match (at tolerance).
-                    const matchScore = Math.round((1 - match.distance) * 100);
-                    const labelText = `${match.label} (${matchScore}%)`;
+                    let labelText = "Searching...";
+                    let nameMatch = "unknown";
 
-                    // Draw Overlay
-                    const drawBox = new faceapi.draw.DrawBox(d.detection.box, { label: labelText });
-                    drawBox.draw(c);
+                    if (faceMatcher) {
+                        const match = faceMatcher.findBestMatch(d.descriptor);
+                        const score = Math.round((1 - match.distance) * 100);
+                        labelText = `${match.label} (${score}%)`;
+                        nameMatch = match.label;
+                    } else {
+                        labelText = "Unknown (No Database)";
+                    }
 
-                    if (match.label !== 'unknown' && match.label !== 'Unknown') {
-                        window.parent.postMessage({ type: 'streamlit:setComponentValue', value: match.label }, '*');
+                    // Draw Box
+                    new faceapi.draw.DrawBox(d.detection.box, { label: labelText }).draw(c);
+
+                    if (nameMatch !== 'unknown' && nameMatch !== 'Unknown') {
+                        window.parent.postMessage({ type: 'streamlit:setComponentValue', value: nameMatch }, '*');
                     }
                 });
-            }, 800);
+            }, 600);
         }
         start();
     </script>
     """
     js_attendance = raw_js_attendance.replace("FACE_API_URL", FACE_API_JS).replace("KNOWN_DATA_JSON", known_json)
-    res = st.components.v1.html(js_attendance, height=520)
+    res = st.components.v1.html(js_attendance, height=550)
 
-    # Attendance Logging
     if res and isinstance(res, str):
-        now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d")
+        date_str = datetime.now().strftime("%Y-%m-%d")
         log_key = f"{res}_{date_str}"
         
         if 'logged_today' not in st.session_state:
@@ -170,11 +186,11 @@ def attendance_page():
             
         if log_key not in st.session_state.logged_today:
             st.session_state.logged_today.add(log_key)
-            new_log = {"Name": res, "Time": now.strftime("%H:%M:%S"), "Date": date_str}
+            new_log = {"Name": res, "Time": datetime.now().strftime("%H:%M:%S"), "Date": date_str}
             st.session_state.attendance_records.insert(0, new_log)
             st.toast(f"Verified: {res}!")
 
-    st.subheader("Recent Attendance")
+    st.subheader("Today's Logs")
     st.dataframe(pd.DataFrame(st.session_state.attendance_records), use_container_width=True)
 
 # --- NAVIGATION ---
