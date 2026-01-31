@@ -47,46 +47,52 @@ def registration_page():
         st.warning("🧬 Processing... If blocked by browser, click the 'Shield' icon in your URL bar and allow 'Tracking'.")
         img_base64 = base64.b64encode(img_file.read()).decode()
         
-        # We use a standard string. Using a different CDN (Cloudflare/cdnjs) 
-        # which is rarely flagged by Tracking Prevention.
-        raw_js = """
+     raw_js = """
         <div id="status" style="font-family:sans-serif; font-size:13px; color:#ff4b4b; padding:10px; background:#f0f2f6; border-radius:5px;">
             Initializing Local AI Engine...
         </div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js"></script>
         <script>
-            async function process() {
+            // This ensures faceapi is defined before we call it
+            window.onload = async function() {
                 const status = document.getElementById('status');
-                try {
-                    // Using a more reliable weight source
-                    const URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
-                    
-                    status.innerText = "Step 1: Downloading AI Weights...";
-                    await faceapi.nets.ssdMobilenetv1.loadFromUri(URL);
-                    await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
-                    await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
-                    
-                    status.innerText = "Step 2: Analyzing Facial Geometry...";
-                    const img = new Image();
-                    img.src = "data:image/jpeg;base64,IMG_DATA";
-                    img.onload = async () => {
-                        const det = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
-                        if (det) {
-                            window.parent.postMessage({
-                                type: 'streamlit:setComponentValue', 
-                                value: Array.from(det.descriptor)
-                            }, '*');
-                            status.innerText = "✅ Encoding Ready!";
-                        } else {
-                            window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'ERR_NO_FACE'}, '*');
-                        }
-                    };
-                } catch (e) {
-                    status.innerText = "ERROR: Browser blocked AI download. Try Incognito mode or disable 'Strict Tracking Prevention'.";
-                    console.error(e);
+                
+                async function process() {
+                    try {
+                        const URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
+                        
+                        status.innerText = "Step 1: Downloading AI Weights...";
+                        // Wait for each model to load
+                        await faceapi.nets.ssdMobilenetv1.loadFromUri(URL);
+                        await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
+                        await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
+                        
+                        status.innerText = "Step 2: Analyzing Facial Geometry...";
+                        const img = new Image();
+                        img.src = "data:image/jpeg;base64,IMG_DATA";
+                        
+                        img.onload = async () => {
+                            const det = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+                            if (det) {
+                                window.parent.postMessage({
+                                    type: 'streamlit:setComponentValue', 
+                                    value: Array.from(det.descriptor)
+                                }, '*');
+                                status.innerText = "✅ Encoding Ready!";
+                            } else {
+                                window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'ERR_NO_FACE'}, '*');
+                                status.innerText = "❌ No face detected.";
+                            }
+                        };
+                    } catch (e) {
+                        status.innerText = "ERROR: " + e.message;
+                        console.error(e);
+                    }
                 }
-            }
-            process();
+                
+                // Safety check: wait 200ms for library to register in global scope
+                setTimeout(process, 200);
+            };
         </script>
         """
         js_component = raw_js.replace("IMG_DATA", img_base64)
