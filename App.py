@@ -15,10 +15,11 @@ DB_FOLDER = "registered_faces"
 PKL_LOG = "attendance_data.pkl"
 MODEL_NAME = "Facenet512"
 
-if not os.path.exists(DB_FOLDER):
-    os.makedirs(DB_FOLDER)
+for folder in [DB_FOLDER]:
+    if not os.path.exists(folder):
+        os.makedirs(folder)
 
-st.set_page_config(page_title="Hybrid Gzip Auth", layout="wide")
+st.set_page_config(page_title="Hybrid Iron-Vision", layout="wide")
 
 # --- MODEL CACHE ---
 @st.cache_resource
@@ -29,93 +30,118 @@ def load_ai_models():
 load_ai_models()
 
 # --- HELPERS ---
-def decompress_and_decode(compressed_data):
-    """Decompress Gzip data and convert back to CV2 image."""
+def decompress_frame(compressed_data):
     try:
-        # 1. URL Unquote & Base64 Decode
         raw_bytes = base64.b64decode(urllib.parse.unquote(compressed_data))
-        # 2. Gzip Decompress
         decompressed = gzip.decompress(raw_bytes)
-        # 3. Decode Image
         nparr = np.frombuffer(decompressed, np.uint8)
         return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    except Exception as e:
-        return None
+    except: return None
 
-# --- JAVASCRIPT: MEDIAPIPE + GZIP ---
-# We use Pako (Gzip) via CDN to compress the cropped face
+def save_log(name):
+    logs = []
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG, "rb") as f:
+            try: logs = pickle.load(f)
+            except: logs = []
+    if not any(entry['Name'] == name and entry['Date'] == datetime.now().strftime("%Y-%m-%d") for entry in logs):
+        logs.append({
+            "Name": name, 
+            "Time": datetime.now().strftime("%H:%M:%S"),
+            "Date": datetime.now().strftime("%Y-%m-%d")
+        })
+        with open(PKL_LOG, "wb") as f:
+            pickle.dump(logs, f)
+        return True
+    return False
+
+# --- JS: VISUAL OVERLAY + GZIP CROP ---
 JS_CODE = """
-<div style="background:#000; border-radius:12px; overflow:hidden; width:100%; height:300px; position:relative;">
-    <video id="v" autoplay playsinline style="width:100%; height:100%; object-fit:contain;"></video>
-    <canvas id="c" style="display:none;"></canvas>
+<div style="position:relative; width:100%; max-width:400px; margin:auto; background:#000; border-radius:15px; overflow:hidden;">
+    <video id="v" autoplay playsinline style="display:none;"></video>
+    <canvas id="display_canvas" style="width:100%; height:auto; display:block;"></canvas>
+    <canvas id="crop_canvas" style="display:none;"></canvas>
+    <div id="status" style="position:absolute; top:10px; left:10px; color:#0F0; font-family:monospace; font-size:12px; text-shadow:1px 1px #000;">AI: INITIALIZING...</div>
 </div>
+
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
 
 <script>
-    const video = document.getElementById('v');
-    const canvas = document.getElementById('c');
-    const ctx = canvas.getContext('2d');
-    
+    const v = document.getElementById('v');
+    const d_can = document.getElementById('display_canvas');
+    const d_ctx = d_can.getContext('2d');
+    const c_can = document.getElementById('crop_canvas');
+    const c_ctx = c_can.getContext('2d');
+    const status = document.getElementById('status');
+
     const faceDetection = new FaceDetection({
         locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
     });
 
-    faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+    faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.6 });
 
     faceDetection.onResults((results) => {
+        d_can.width = v.videoWidth; d_can.height = v.videoHeight;
+        d_ctx.drawImage(v, 0, 0, d_can.width, d_can.height);
+        
         if (results.detections.length > 0) {
+            status.innerText = "AI: TRACKING FACE";
             const bbox = results.detections[0].boundingBox;
-            // Crop face from video
-            canvas.width = 160; canvas.height = 160;
-            ctx.drawImage(video, 
-                bbox.xCenter * video.videoWidth - (bbox.width * video.videoWidth / 2), 
-                bbox.yCenter * video.videoHeight - (bbox.height * video.videoHeight / 2), 
-                bbox.width * video.videoWidth, bbox.height * video.videoHeight,
+            
+            // DRAW RECTANGLE (Visual Only)
+            d_ctx.strokeStyle = "#00FF00";
+            d_ctx.lineWidth = 4;
+            d_ctx.strokeRect(
+                bbox.xCenter * d_can.width - (bbox.width * d_can.width / 2),
+                bbox.yCenter * d_can.height - (bbox.height * d_can.height / 2),
+                bbox.width * d_can.width, bbox.height * d_can.height
+            );
+
+            // CROP & COMPRESS
+            c_can.width = 160; c_can.height = 160;
+            c_ctx.drawImage(v, 
+                bbox.xCenter * v.videoWidth - (bbox.width * v.videoWidth / 2), 
+                bbox.yCenter * v.videoHeight - (bbox.height * v.videoHeight / 2), 
+                bbox.width * v.videoWidth, bbox.height * v.videoHeight,
                 0, 0, 160, 160
             );
             
-            // Get Image Data and GZIP it
-            const dataURL = canvas.toDataURL('image/jpeg', 0.4);
-            const binaryString = atob(dataURL.split(',')[1]);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+            const dataURL = c_can.toDataURL('image/jpeg', 0.4);
+            const bytes = Uint8Array.from(atob(dataURL.split(',')[1]), c => c.charCodeAt(0));
+            const compressed = btoa(String.fromCharCode.apply(null, pako.gzip(bytes)));
             
-            const compressed = pako.gzip(bytes);
-            const b64compressed = btoa(String.fromCharCode.apply(null, compressed));
-            
-            window.parent.postMessage({
-                type: "streamlit:setComponentValue",
-                value: encodeURIComponent(b64compressed)
-            }, "*");
+            window.parent.postMessage({type: "streamlit:setComponentValue", value: encodeURIComponent(compressed)}, "*");
+        } else {
+            status.innerText = "AI: SEARCHING...";
         }
     });
 
-    const camera = new Camera(video, {
-        onFrame: async () => { await faceDetection.send({image: video}); },
-        width: 320, height: 240
+    const camera = new Camera(v, {
+        onFrame: async () => { await faceDetection.send({image: v}); },
+        width: 400, height: 300
     });
     camera.start();
 </script>
 """
 
-# --- UI LOGIC ---
+# --- UI NAVIGATION ---
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log History"])
 
 if page == "Register":
     st.header("👤 Face Registration")
-    name = st.text_input("Name").upper()
-    file = st.file_uploader("Upload Image", type=['jpg', 'png', 'jpeg'])
-    if st.button("Save User") and name and file:
+    name = st.text_input("Full Name").upper()
+    file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'])
+    if st.button("Register User") and name and file:
         with open(os.path.join(DB_FOLDER, f"{name}.jpg"), "wb") as f:
             f.write(file.getbuffer())
         for p in [f for f in os.listdir(DB_FOLDER) if f.endswith('.pkl')]:
             os.remove(os.path.join(DB_FOLDER, p))
-        st.success(f"Registered {name}")
+        st.success(f"Registered {name}!")
 
 elif page == "Live Feed":
-    st.header("📹 Hybrid Biometric Feed")
+    st.header("📹 Live Biometric Scanner")
     col_v, col_s = st.columns([2, 1])
     
     with col_v:
@@ -123,26 +149,30 @@ elif page == "Live Feed":
 
     with col_s:
         if img_data:
-            frame = decompress_and_decode(img_data)
+            frame = decompress_frame(img_data)
             if frame is not None:
                 try:
                     res = DeepFace.find(img_path=frame, db_path=DB_FOLDER, 
                                        model_name=MODEL_NAME, enforce_detection=False, 
                                        detector_backend="skip", silent=True)
-                    
                     if len(res) > 0 and not res[0].empty:
                         m_name = os.path.basename(res[0].iloc[0]['identity']).split('.')[0]
                         dist = res[0].iloc[0]['distance']
-                        acc = max(0, int((1 - dist/0.4) * 100))
-                        
-                        st.metric("Detected", m_name, f"{acc}% Match")
-                        if m_name not in st.session_state.get('logged_set', set()):
-                            # Save attendance...
-                            st.toast(f"✅ Logged: {m_name}")
-                    else: st.info("Scanning...")
-                except Exception as e: st.error("Engine Resyncing...")
-        else: st.info("Awaiting Face...")
+                        acc = max(0, int((1 - dist/0.35) * 100))
+                        st.metric("Identity", m_name, f"{acc}% Match")
+                        if save_log(m_name): st.toast(f"✅ Logged: {m_name}")
+                    else: st.info("Comparing identity...")
+                except: st.error("Engine Resyncing...")
+        else: st.info("Waiting for face detection...")
 
 elif page == "Log History":
-    # ... standard table logic ...
-    pass
+    st.header("📊 Attendance Log")
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG, "rb") as f: data = pickle.load(f)
+        if data:
+            st.table(pd.DataFrame(data))
+            if st.button("🔥 WIPE DATA"):
+                os.remove(PKL_LOG)
+                st.rerun()
+        else: st.info("No entries for today.")
+    else: st.info("Log file not found.")
