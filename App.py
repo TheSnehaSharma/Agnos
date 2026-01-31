@@ -12,6 +12,7 @@ LOG_FILE = "attendance_log.csv"
 
 st.set_page_config(page_title="Privacy Face Auth", layout="wide")
 
+# Initialize persistence
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
@@ -48,16 +49,6 @@ JS_CODE = """
     const runMode = "RUN_MODE_PLACEHOLDER";
     
     let faceLandmarker;
-    let currentIdentity = "Unknown";
-    let currentConfidence = 0;
-
-    // Listen for identity updates from Python
-    window.addEventListener("message", (event) => {
-        if (event.data.type === "identity_update") {
-            currentIdentity = event.data.name;
-            currentConfidence = event.data.confidence;
-        }
-    });
 
     async function init() {
         try {
@@ -77,7 +68,7 @@ JS_CODE = """
                     const results = await faceLandmarker.detect(staticImg);
                     if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                         const landmarks = results.faceLandmarks[0];
-                        drawOverlay(landmarks, "Target", 100);
+                        drawOverlay(landmarks, "DETECTED", 100);
                         const dataString = btoa(JSON.stringify(landmarks));
                         const url = new URL(window.parent.location.href);
                         url.searchParams.set("face_data", dataString);
@@ -100,8 +91,6 @@ JS_CODE = """
 
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
-            drawOverlay(landmarks, currentIdentity, currentConfidence);
-            
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
@@ -116,20 +105,13 @@ JS_CODE = """
         const minX = Math.min(...xs), maxX = Math.max(...xs);
         const minY = Math.min(...ys), maxY = Math.max(...ys);
 
-        const color = name === "Unknown" ? "#FF4B4B" : "#00FF00";
-        
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 4;
+        ctx.strokeStyle = "#00FF00"; ctx.lineWidth = 4;
         ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
-
-        // Label Background
-        ctx.fillStyle = color;
-        ctx.fillRect(minX, minY - 30, maxX - minX, 30);
-
-        // Label Text
-        ctx.fillStyle = "white";
-        ctx.font = "bold 16px monospace";
-        ctx.fillText(`${name} (${conf}%)`, minX + 5, minY - 10);
+        ctx.fillStyle = "#00FF00";
+        ctx.fillRect(minX, minY - 25, maxX - minX, 25);
+        ctx.fillStyle = "black";
+        ctx.font = "bold 14px monospace";
+        ctx.fillText(name + " " + conf + "%", minX + 5, minY - 8);
     }
     init();
 </script>
@@ -137,7 +119,7 @@ JS_CODE = """
 
 def get_component_html(img_b64=None):
     html_template = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
-    html_template += f'<div id="view"><div id="status-bar">LIVE SYSTEM</div>'
+    html_template += f'<div id="view"><div id="status-bar">SYSTEM ACTIVE</div>'
     html_template += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
     html_template += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
     html_template += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
@@ -153,65 +135,4 @@ if page == "Register":
     name = st.text_input("Person Name", key="reg_name").upper()
     uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'], key="uploader")
     
-    url_data = st.query_params.get("face_data")
-    if url_data:
-        try: st.session_state.reg_data = base64.b64decode(url_data).decode()
-        except: pass
-
-    if uploaded_file:
-        b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
-        st.components.v1.html(get_component_html(b64_img), height=420)
-        
-    if "reg_data" in st.session_state and name:
-        st.success(f"✅ Facial landmarks captured for {name}!")
-        if st.button("Confirm & Save to Database"):
-            st.session_state.db[name] = json.loads(st.session_state.reg_data)
-            with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
-            st.query_params.clear()
-            if "reg_data" in st.session_state: del st.session_state.reg_data
-            st.success(f"Registered {name} successfully!")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("📜 Recent Registrations")
-    if st.session_state.db:
-        st.table(pd.DataFrame(list(st.session_state.db.keys())[::-1][:10], columns=["Name"]))
-
-elif page == "Live Feed":
-    st.header("📹 Live Attendance Terminal")
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        # Standard Streamlit Component
-        feed_val = st.components.v1.html(get_component_html(), height=420)
-    
-    with col2:
-        if isinstance(feed_val, str) and feed_val != "READY":
-            current_face = json.loads(feed_val)
-            identified = "Unknown"
-            highest_conf = 0
-            
-            # Match Logic
-            for db_name, saved_face in st.session_state.db.items():
-                curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
-                save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
-                dist = np.mean(np.linalg.norm(curr_arr - save_arr, axis=1))
-                
-                # Confidence Calculation: 0.05 dist = 0%, 0.0 dist = 100%
-                conf = max(0, int((1 - (dist / 0.05)) * 100))
-                
-                if dist < 0.05 and conf > highest_conf:
-                    identified = db_name
-                    highest_conf = conf
-
-            st.metric("Detected", identified, f"{highest_conf}% Match" if highest_conf > 0 else None)
-
-            # --- LOGGING FIX ---
-            if identified != "Unknown":
-                # Create a simple unique key for the user today
-                today = datetime.now().strftime("%Y-%m-%d")
-                log_check = f"{identified}_{today}"
-                
-                if "last_logged" not in st.session_state or st.session_state.last_logged != log_check:
-                    now_time = datetime.now().strftime("%H:%M:%S")
-                    new_entry = pd.DataFrame({"
+    url_data = st.query_
