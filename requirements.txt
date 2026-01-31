@@ -1,5 +1,5 @@
 streamlit
-streamlit-webrtc >=0.48.1
+streamlit-javascript
 opencv-python-headless
 numpy
 pandas
