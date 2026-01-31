@@ -1,6 +1,6 @@
 streamlit
 streamlit-javascript
-streamlit-webrtc
+pako
 opencv-python-headless
 numpy
 pandas
