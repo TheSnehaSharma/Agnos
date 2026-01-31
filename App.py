@@ -47,7 +47,7 @@ def registration_page():
         st.warning("🧬 Processing... If blocked by browser, click the 'Shield' icon in your URL bar and allow 'Tracking'.")
         img_base64 = base64.b64encode(img_file.read()).decode()
         
-     raw_js = """
+    raw_js = """
         <div id="status" style="font-family:sans-serif; font-size:13px; color:#ff4b4b; padding:10px; background:#f0f2f6; border-radius:5px;">
             Initializing Local AI Engine...
         </div>
