@@ -1,115 +1,146 @@
 import streamlit as st
+import pandas as pd
 import cv2
 import numpy as np
 import base64
 import os
+import pickle
 from insightface.app import FaceAnalysis
+from datetime import datetime
 
-# --- 1. AI ENGINE ---
+# --- 1. SETUP & CONFIG ---
+DB_FOLDER = "registered_faces"
+PKL_LOG = "attendance_data.pkl"
+
+for folder in [DB_FOLDER]:
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+
+st.set_page_config(page_title="Iron-Vision Biometric", layout="wide")
+
+# --- 2. AI ENGINE ---
 @st.cache_resource
 def load_ai():
-    # buffalo_s is the lightest pre-compiled model
+    # 'buffalo_s' is pre-compiled and works without C++ build tools
     app = FaceAnalysis(name='buffalo_s', providers=['CPUExecutionProvider'])
     app.prepare(ctx_id=0, det_size=(320, 320))
     return app
 
-# --- 2. JS BRIDGE (THE URL HACK) ---
-# This script bypasses the "DeltaGenerator" by writing data to the URL hash
-JS_URL_BRIDGE = """
-<div style="background:#000; color:#0F0; font-family:monospace; padding:10px; border-radius:10px;">
-    <video id="v" autoplay playsinline style="width:100%; height:auto; border:1px solid #333;"></video>
-    <canvas id="c" style="display:none;"></canvas>
-    <div id="msg">INITIALIZING CAMERA...</div>
-</div>
+# --- 3. JAVASCRIPT BRIDGE (THE HIDDEN INPUT HACK) ---
+def camera_bridge():
+    JS_CODE = """
+    <div style="background:#000; border-radius:15px; padding:10px; text-align:center;">
+        <video id="v" autoplay playsinline style="width:100%; max-width:320px; border-radius:10px;"></video>
+        <canvas id="c" style="display:none;"></canvas>
+        <div id="msg" style="color:#0F0; font-family:monospace; margin-top:10px;">SYSTEM: INITIALIZING...</div>
+    </div>
 
-<script>
-    const v = document.getElementById('v');
-    const c = document.getElementById('c');
-    const ctx = c.getContext('2d');
-    const msg = document.getElementById('msg');
+    <script>
+        const v = document.getElementById('v');
+        const c = document.getElementById('c');
+        const ctx = c.getContext('2d');
+        const msg = document.getElementById('msg');
 
-    navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
-        .then(s => { v.srcObject = s; msg.innerText = "SENSOR ONLINE"; })
-        .catch(e => { msg.innerText = "ERROR: " + e.name; });
+        // Request Camera
+        navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
+            .then(s => { v.srcObject = s; msg.innerText = "SYSTEM: ONLINE"; })
+            .catch(e => { msg.innerText = "ERROR: " + e.name; });
 
-    function sync() {
-        if (v.videoWidth > 0) {
-            c.width = 320; c.height = 240;
-            ctx.drawImage(v, 0, 0, 320, 240);
-            const data = c.toDataURL('image/jpeg', 0.4);
-            
-            // WE SEND DATA TO THE URL HASH
-            // Streamlit detects URL changes and reruns automatically
-            if (data.length > 2000) {
-                const b64 = data.split(',')[1];
-                window.parent.location.hash = "frame=" + b64;
-                msg.innerText = "SYNCING: " + b64.length + " bytes";
+        function sendToPython() {
+            if (v.videoWidth > 0) {
+                c.width = 160; c.height = 120; // Low res for speed
+                ctx.drawImage(v, 0, 0, 160, 120);
+                const data = c.toDataURL('image/jpeg', 0.4);
+                
+                // This is the magic: finding the Streamlit text input and "typing" into it
+                const inputs = window.parent.document.querySelectorAll('input');
+                for (let i of inputs) {
+                    if (i.ariaLabel === "hidden_bridge") {
+                        i.value = data;
+                        i.dispatchEvent(new Event('input', { bubbles: true }));
+                        msg.innerText = "SYNCING: " + data.length + " bytes";
+                        break;
+                    }
+                }
             }
         }
-    }
-    setInterval(sync, 2000); // Sync every 2 seconds
-</script>
-"""
+        setInterval(sendToPython, 2000); // Sync every 2 seconds
+    </script>
+    """
+    return st.components.v1.html(JS_CODE, height=320)
 
-# --- 3. MAIN UI ---
-st.set_page_config(page_title="Agnos: URL Bridge", layout="wide")
-st.title("🛰️ Agnos URL Bridge")
+# --- 4. NAVIGATION ---
+page = st.sidebar.radio("Navigate", ["Register Face", "Live Scanner", "Attendance Logs"])
 
-# Navigation Sidebar
-page = st.sidebar.radio("Navigation", ["Live Feed", "Register Face", "Log History"])
+# --- PAGE 1: REGISTER ---
+if page == "Register Face":
+    st.header("👤 Face Registration")
+    with st.form("reg_form", clear_on_submit=True):
+        name = st.text_input("FULL NAME").upper()
+        file = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'])
+        if st.form_submit_button("Save to Database"):
+            if name and file:
+                path = os.path.join(DB_FOLDER, f"{name}.jpg")
+                with open(path, "wb") as f:
+                    f.write(file.getbuffer())
+                st.success(f"Registered {name} successfully.")
 
-if page == "Live Feed":
-    col_cam, col_py = st.columns([1, 1])
+    st.markdown("---")
+    st.subheader("🗂️ Database Manager")
+    db_files = [f for f in os.listdir(DB_FOLDER) if f.endswith(('.jpg', '.png'))]
+    for f in db_files:
+        c1, c2 = st.columns([4, 1])
+        c1.write(f"✅ {f.split('.')[0]}")
+        if c2.button("Delete", key=f):
+            os.remove(os.path.join(DB_FOLDER, f))
+            st.rerun()
 
-    with col_cam:
-        st.subheader("1. Browser Feed")
-        # We render the component but DO NOT assign it to a variable
-        st.components.v1.html(JS_URL_BRIDGE, height=300)
-
-    with col_py:
-        st.subheader("2. Python AI Engine")
+# --- PAGE 2: LIVE SCANNER ---
+elif page == "Live Scanner":
+    st.header("📹 Live Identification")
+    
+    col_v, col_s = st.columns([1, 1])
+    
+    with col_v:
+        # 1. The visible camera UI
+        camera_bridge()
         
-        # We read directly from the URL hash
-        # This is the only way to get true data back from a raw HTML component
-        try:
-            # Get the hash from the URL
-            raw_hash = st.query_params.to_dict()
-            # Note: Depending on your Streamlit version, we might need 
-            # to use a hidden text_input + JS injection if query_params are limited.
-            
-            # Let's use the most compatible "Query" method:
-            img_b64 = st.query_params.get("frame")
+        # 2. The HIDDEN bridge widget
+        # The aria-label MUST match the JS selector above
+        raw_data = st.text_input("bridge", label_visibility="collapsed", key="hidden_bridge", help="hidden_bridge")
 
-            if img_b64:
-                # Fix padding
-                img_b64 += "=" * ((4 - len(img_b64) % 4) % 4)
-                img_bytes = base64.b64decode(img_b64)
-                
-                nparr = np.frombuffer(img_bytes, np.uint8)
+    with col_s:
+        st.subheader("AI System Status")
+        if raw_data and len(raw_data) > 2000:
+            try:
+                # Decode
+                encoded = raw_data.split(",")[1]
+                nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
+                
                 if frame is not None:
-                    st.image(frame, width=200, caption="Received via URL Bridge")
+                    # Run AI
                     engine = load_ai()
                     faces = engine.get(frame)
                     
-                    if len(faces) > 0:
-                        st.success(f"🎯 MATCH FOUND: {len(faces)} Faces")
+                    if faces:
+                        st.success(f"🎯 FACE DETECTED!")
+                        st.image(frame, width=150)
+                        # Here you would add the vector comparison logic
                     else:
-                        st.warning("Scanning for face...")
+                        st.warning("Scanning... (Align your face)")
                 else:
-                    st.error("Frame Corrupted in transit.")
-            else:
-                st.info("Awaiting first handshake from URL...")
-        except Exception as e:
-            st.error(f"Bridge Error: {e}")
+                    st.error("Frame Corrupted.")
+            except Exception as e:
+                st.error(f"Syncing: {e}")
+        else:
+            st.info("Awaiting Handshake... (Check Camera Permissions)")
 
-elif page == "Register Face":
-    st.header("👤 Registration")
-    # ... (Your existing registration code)
-    st.info("Register your face here to build the database.")
-
-elif page == "Log History":
+# --- PAGE 3: LOGS ---
+elif page == "Attendance Logs":
     st.header("📊 History")
-    # ... (Your existing log history code)
-    st.info("Attendance logs will appear here.")
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG, "rb") as f: data = pickle.load(f)
+        st.table(pd.DataFrame(data))
+    else:
+        st.info("No records found.")
