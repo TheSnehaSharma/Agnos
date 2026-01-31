@@ -23,6 +23,10 @@ if "logs" not in st.session_state:
         except: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
+# Persistent buffer for the registration data
+if 'buffered_encoding' not in st.session_state:
+    st.session_state.buffered_encoding = None
+
 # --- COMPONENT CODE ---
 INTERFACE_CODE = """
 <!DOCTYPE html>
@@ -80,7 +84,6 @@ INTERFACE_CODE = """
                 ctx.lineWidth = 3;
                 ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
                 
-                // CRITICAL: Send the landmarks back to Streamlit
                 window.parent.postMessage({
                     type: "streamlit:setComponentValue",
                     value: JSON.stringify(landmarks)
@@ -101,33 +104,38 @@ if page == "Register":
     st.header("👤 Registration")
     name = st.text_input("Person Name").upper()
     
-    # Capture the data from the component
-    # 'component_value' will be the JSON string sent via postMessage
-    component_value = st.components.v1.html(INTERFACE_CODE, height=420)
+    # Capture the data
+    component_data = st.components.v1.html(INTERFACE_CODE, height=420)
     
-    # Check if we have a valid string and not the DeltaGenerator
-    if component_value and isinstance(component_value, str):
-        st.session_state.last_seen_encoding = component_value
-        st.success("✅ Face features captured in browser.")
+    # 1. Check if the component just sent data
+    if isinstance(component_data, str):
+        st.session_state.buffered_encoding = component_data
 
+    # 2. Display status based on the buffer
+    if st.session_state.buffered_encoding:
+        st.success("✅ Face Encoded. Data is locked in memory.")
+    else:
+        st.warning("🔍 Looking for face...")
+
+    # 3. Button uses the buffered data
     if st.button("Save Face to Database"):
         if not name:
             st.error("Please enter a name.")
-        elif 'last_seen_encoding' in st.session_state:
+        elif st.session_state.buffered_encoding:
             try:
-                # Only use the data if it's a string
-                data_str = st.session_state.last_seen_encoding
-                st.session_state.db[name] = json.loads(data_str)
-                
+                # Save the buffered data
+                st.session_state.db[name] = json.loads(st.session_state.buffered_encoding)
                 with open(DB_FILE, "w") as f:
                     json.dump(st.session_state.db, f)
                 
                 st.success(f"Successfully saved {name}!")
+                # Reset buffer after save
+                st.session_state.buffered_encoding = None
                 st.rerun()
             except Exception as e:
                 st.error(f"Save failed: {e}")
         else:
-            st.warning("No face detected yet. Stand in front of the camera.")
+            st.error("Still no data. Please ensure the green box is visible and wait 1 second.")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Feed")
@@ -137,12 +145,11 @@ elif page == "Live Feed":
         feed_val = st.components.v1.html(INTERFACE_CODE, height=420)
         
     with col2:
-        if feed_val and isinstance(feed_val, str):
+        if isinstance(feed_val, str):
             current_face = json.loads(feed_val)
             identified = "Unknown"
             
             for name, saved_face in st.session_state.db.items():
-                # Compare landmarks (Efficiency: check first 30 points)
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
                 dist = np.mean(np.linalg.norm(curr_arr - save_arr, axis=1))
