@@ -11,7 +11,7 @@ st.set_page_config(page_title="Private AI Attendance", layout="wide")
 DB_FILE = "registered_faces.json"
 LOG_FILE = "attendance_log.csv"
 
-# Initialize Session State
+# Ensure session state is synced with local files
 if 'registered_users' not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f:
@@ -21,20 +21,24 @@ if 'registered_users' not in st.session_state:
 
 if 'attendance_records' not in st.session_state:
     if os.path.exists(LOG_FILE):
-        st.session_state.attendance_records = pd.read_csv(LOG_FILE).to_dict('records')
+        try:
+            st.session_state.attendance_records = pd.read_csv(LOG_FILE).to_dict('records')
+        except:
+            st.session_state.attendance_records = []
     else:
         st.session_state.attendance_records = []
 
-# --- 2. REGISTRATION PAGE (ENCODE ON CLIENT) ---
+# --- 2. REGISTRATION PAGE (LOCAL ENCODING) ---
 def registration_page():
     st.title("👤 Local Privacy Registration")
-    st.info("Your image never leaves your browser. Only a 128-digit mathematical map is saved.")
+    st.info("🔒 Face geometry is calculated in your browser. Original photos are never stored or sent to the server.")
     
-    name = st.text_input("Full Name").strip().upper()
+    name = st.text_input("Enter Full Name").strip().upper()
     img_file = st.file_uploader("Upload Profile Photo", type=['jpg', 'png', 'jpeg'])
 
     if img_file and name:
-        img_base64 = base64.b64encode(img_file.read()).decode()
+        img_bytes = img_file.read()
+        img_base64 = base64.b64encode(img_bytes).decode()
         
         js_reg = f"""
         <div id="status-box" style="padding:10px; background:#f0f2f6; border-radius:8px; font-family:sans-serif;">
@@ -81,7 +85,7 @@ def registration_page():
         if extracted_vector and isinstance(extracted_vector, list):
             st.success(f"Mathematical features extracted for {name}")
             if st.button(f"Confirm Registration for {name}"):
-                new_user = {"name": name, "encoding": extracted_vector}
+                new_user = {{"name": name, "encoding": extracted_vector}}
                 st.session_state.registered_users.append(new_user)
                 with open(DB_FILE, "w") as f:
                     json.dump(st.session_state.registered_users, f)
@@ -93,7 +97,7 @@ def registration_page():
     if st.session_state.registered_users:
         st.table(pd.DataFrame(st.session_state.registered_users)[['name']].tail(10))
 
-# --- 3. ATTENDANCE PAGE (LIVE FEED) ---
+# --- 3. ATTENDANCE PAGE (LIVE SCANNER) ---
 def attendance_page():
     st.title("📹 Live Presence Scanner")
     
@@ -102,42 +106,5 @@ def attendance_page():
     
     known_json = json.dumps(st.session_state.registered_users)
 
-    # Note the double {{ }} for JS logic
     js_attendance = f"""
-    <div style="position: relative; display: inline-block; width: 100%;">
-        <video id="v" autoplay muted playsinline style="width: 100%; max-width: 600px; border-radius: 10px; background:#000;"></video>
-        <canvas id="c" style="position: absolute; top: 0; left: 0;"></canvas>
-    </div>
-    <p id="msg" style="font-family:sans-serif; color: #666; margin-top:10px;">Initializing Camera & AI...</p>
-
-    <script type="module">
-        import * as faceapi from 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.esm.js';
-
-        const v = document.getElementById('v');
-        const c = document.getElementById('c');
-        const m = document.getElementById('msg');
-        const known = {known_json};
-
-        async function start() {{
-            try {{
-                const URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
-                await faceapi.nets.tinyFaceDetector.loadFromUri(URL);
-                await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
-                await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
-
-                const stream = await navigator.mediaDevices.getUserMedia({{ video: true }});
-                v.srcObject = stream;
-
-                v.onloadedmetadata = () => {{
-                    c.width = v.videoWidth;
-                    c.height = v.videoHeight;
-                    m.innerText = "🔒 Scanner Active (0.5 Tolerance)";
-                    run();
-                }};
-            }} catch(e) {{ m.innerText = "❌ Error: " + e.message; }}
-        }}
-
-        async function run() {{
-            let faceMatcher = null;
-            if (known.length > 0) {{
-                const labels = known.map(u => new faceapi.Labeled
+    <div style="position: relative; display: inline-block; width: 100
