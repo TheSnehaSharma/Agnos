@@ -18,11 +18,10 @@ if "db" not in st.session_state:
     else: st.session_state.db = {}
 
 if "logs" not in st.session_state:
-    if os.path.exists(LOG_FILE): st.session_state.logs = pd.read_csv(LOG_FILE)
+    if os.path.exists(LOG_FILE):
+        try: st.session_state.logs = pd.read_csv(LOG_FILE)
+        except: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
-
-if 'active_encoding' not in st.session_state:
-    st.session_state.active_encoding = None
 
 # --- COMPONENT CODE ---
 INTERFACE_CODE = """
@@ -81,6 +80,7 @@ INTERFACE_CODE = """
                 ctx.lineWidth = 3;
                 ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
                 
+                // CRITICAL: Send the landmarks back to Streamlit
                 window.parent.postMessage({
                     type: "streamlit:setComponentValue",
                     value: JSON.stringify(landmarks)
@@ -98,59 +98,51 @@ INTERFACE_CODE = """
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
-    st.header("👤 Registration (Dual-Step)")
-    
+    st.header("👤 Registration")
     name = st.text_input("Person Name").upper()
     
-    # Render the component
-    res = st.components.v1.html(INTERFACE_CODE, height=420)
+    # Capture the data from the component
+    # 'component_value' will be the JSON string sent via postMessage
+    component_value = st.components.v1.html(INTERFACE_CODE, height=420)
     
-    # Continuous buffer update
-    if res:
-        st.session_state.active_encoding = res
+    # Check if we have a valid string and not the DeltaGenerator
+    if component_value and isinstance(component_value, str):
+        st.session_state.last_seen_encoding = component_value
+        st.success("✅ Face features captured in browser.")
 
-    # UI logic based on whether a face is being detected
-    if st.session_state.active_encoding:
-        st.success("✅ Face Detected & Encoded in Browser")
-        
-        # Step 1: Lock the data
-        if st.button("Step 1: Process Current Face"):
-            st.session_state['locked_encoding'] = st.session_state.active_encoding
-            st.info("Face geometry processed. Ready to save.")
-
-        # Step 2: Save to file
-        if 'locked_encoding' in st.session_state and name:
-            if st.button(f"Step 2: Save {name} to Database"):
-                try:
-                    encoding_list = json.loads(st.session_state['locked_encoding'])
-                    st.session_state.db[name] = encoding_list
-                    
-                    with open(DB_FILE, "w") as f:
-                        json.dump(st.session_state.db, f)
-                    
-                    st.success(f"Successfully saved {name} to {DB_FILE}!")
-                    # Cleanup
-                    del st.session_state['locked_encoding']
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Save failed: {e}")
-    else:
-        st.warning("🔍 Looking for face... Please center yourself in the frame.")
+    if st.button("Save Face to Database"):
+        if not name:
+            st.error("Please enter a name.")
+        elif 'last_seen_encoding' in st.session_state:
+            try:
+                # Only use the data if it's a string
+                data_str = st.session_state.last_seen_encoding
+                st.session_state.db[name] = json.loads(data_str)
+                
+                with open(DB_FILE, "w") as f:
+                    json.dump(st.session_state.db, f)
+                
+                st.success(f"Successfully saved {name}!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Save failed: {e}")
+        else:
+            st.warning("No face detected yet. Stand in front of the camera.")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Feed")
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        current_data = st.components.v1.html(INTERFACE_CODE, height=420)
+        feed_val = st.components.v1.html(INTERFACE_CODE, height=420)
         
     with col2:
-        if current_data:
-            current_face = json.loads(current_data)
+        if feed_val and isinstance(feed_val, str):
+            current_face = json.loads(feed_val)
             identified = "Unknown"
             
-            # Use only known names from the DB
             for name, saved_face in st.session_state.db.items():
+                # Compare landmarks (Efficiency: check first 30 points)
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
                 dist = np.mean(np.linalg.norm(curr_arr - save_arr, axis=1))
@@ -159,16 +151,15 @@ elif page == "Live Feed":
                     identified = name
                     break
             
-            st.subheader(f"Detected: {identified}")
+            st.subheader(f"Status: {identified}")
             
-            # Log only known faces
             if identified != "Unknown":
                 if identified not in st.session_state.logs["Name"].values:
                     now = datetime.now().strftime("%H:%M:%S")
                     new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
                     st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
                     st.session_state.logs.to_csv(LOG_FILE, index=False)
-                    st.toast(f"Marked attendance for {identified}")
+                    st.toast(f"Logged {identified}")
 
 elif page == "Log":
     st.header("📊 Attendance Log")
