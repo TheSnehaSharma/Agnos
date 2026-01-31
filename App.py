@@ -92,64 +92,108 @@ def registration_page():
 
 # --- 3. ATTENDANCE PAGE ---
 def attendance_page():
-    st.title("📹 Live Presence Scanner")
+    st.title("📹 Live Privacy Scanner")
+    
+    if not st.session_state.registered_users:
+        st.warning("⚠️ No users registered. Showing feed in 'Detection Only' mode.")
+    
     known_json = json.dumps(st.session_state.registered_users)
 
-    # Note: We use the same 'Sync-Check' for the live feed
-    js_attendance = f"""
-    <div style="position: relative;">
-        <video id="v" autoplay muted playsinline style="width: 100%; max-width: 500px; border-radius: 10px;"></video>
+    # We use a standard string and .replace() to avoid f-string syntax errors
+    raw_js_attendance = """
+    <div style="position: relative; display: inline-block; width: 100%;">
+        <video id="v" autoplay muted playsinline style="width: 100%; max-width: 600px; border-radius: 10px; background:#000;"></video>
         <canvas id="c" style="position: absolute; top: 0; left: 0;"></canvas>
     </div>
-    <div id="m" style="margin-top:10px; font-family:sans-serif; font-weight:bold;">Loading Camera AI...</div>
+    <p id="msg" style="font-family:sans-serif; color: #666; margin-top:10px;">Initializing Camera & AI...</p>
 
-    <script src="{FACE_API_JS}"></script>
-    <script>
+    <script type="module">
+        // Importing the modern ESM version of the AI
+        import * as faceapi from 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.esm.js';
+
         const v = document.getElementById('v');
         const c = document.getElementById('c');
-        const m = document.getElementById('m');
-        const known = {known_json};
+        const m = document.getElementById('msg');
+        const known = KNOWN_DATA_JSON;
 
-        async function start() {{
-            const URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
-            await faceapi.nets.tinyFaceDetector.loadFromUri(URL);
-            await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
-            await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
+        async function start() {
+            try {
+                const URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
+                
+                m.innerText = "Step 1: Loading AI Models...";
+                await faceapi.nets.tinyFaceDetector.loadFromUri(URL);
+                await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
+                await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
 
-            const stream = await navigator.mediaDevices.getUserMedia({{ video: true }});
-            v.srcObject = stream;
-            v.onloadedmetadata = () => {{
-                c.width = v.videoWidth; c.height = v.videoHeight;
-                m.innerText = "🔒 Scanner Active (0.5 Tolerance)";
-                run();
-            }};
-        }}
+                m.innerText = "Step 2: Accessing Camera...";
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } } 
+                });
+                v.srcObject = stream;
 
-        async function run() {{
-            const labels = known.map(u => new faceapi.LabeledFaceDescriptors(u.name, [new Float32Array(u.encoding)]));
-            const matcher = new faceapi.FaceMatcher(labels, 0.5);
+                v.onloadedmetadata = () => {
+                    c.width = v.videoWidth;
+                    c.height = v.videoHeight;
+                    m.innerText = "🔒 Scanner Active (Privacy-Enforced)";
+                    run();
+                };
+            } catch(e) { 
+                m.innerText = "❌ Error: " + e.message;
+                if (e.name === "NotAllowedError") {
+                    m.innerText += " - Please allow camera access in your browser settings.";
+                }
+            }
+        }
 
-            setInterval(async () => {{
-                const det = await faceapi.detectAllFaces(v, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptors();
+        async function run() {
+            // Setup local matcher from the vector data provided by Python
+            let faceMatcher = null;
+            if (known.length > 0) {
+                const labels = known.map(u => new faceapi.LabeledFaceDescriptors(u.name, [new Float32Array(u.encoding)]));
+                faceMatcher = new faceapi.FaceMatcher(labels, 0.5); // 0.5 Tolerance
+            }
+
+            setInterval(async () => {
+                const detections = await faceapi.detectAllFaces(v, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptors();
+                const displaySize = { width: v.videoWidth, height: v.videoHeight };
+                const resized = faceapi.resizeResults(detections, displaySize);
+                
                 const ctx = c.getContext('2d');
                 ctx.clearRect(0, 0, c.width, c.height);
 
-                faceapi.resizeResults(det, {{width: v.videoWidth, height: v.videoHeight}}).forEach(d => {{
-                    const match = matcher.findBestMatch(d.descriptor);
-                    const score = Math.round((1 - match.distance) * 100);
-                    new faceapi.draw.DrawBox(d.detection.box, {{ label: match.label + ' (' + score + '%)' }}).draw(c);
-                    if (match.label !== 'unknown') {{
-                        window.parent.postMessage({{ type: 'streamlit:setComponentValue', value: match.label }}, '*');
-                    }}
-                }});
-            }}, 800);
-        }}
+                resized.forEach(d => {
+                    let labelText = "Searching...";
+                    let nameMatch = "unknown";
+
+                    if (faceMatcher) {
+                        const match = faceMatcher.findBestMatch(d.descriptor);
+                        const score = Math.round((1 - match.distance) * 100);
+                        labelText = `${match.label} (${score}%)`;
+                        nameMatch = match.label;
+                    }
+
+                    // Local Drawing
+                    new faceapi.draw.DrawBox(d.detection.box, { label: labelText }).draw(c);
+
+                    // If a match is found, notify Streamlit (Python)
+                    if (nameMatch !== 'unknown') {
+                        window.parent.postMessage({ type: 'streamlit:setComponentValue', value: nameMatch }, '*');
+                    }
+                });
+            }, 700);
+        }
         start();
     </script>
     """
+    js_attendance = raw_js_attendance.replace("KNOWN_DATA_JSON", known_json)
     res = st.components.v1.html(js_attendance, height=550)
+
+    # Python Logging Logic
     if res and isinstance(res, str):
-        st.toast(f"Seen: {res}")
+        # (Your existing logging code here...)
+        st.toast(f"Verified: {res}!")
+
+# (Ensure your navigation logic calls attendance_page())
 
 # --- NAV ---
 choice = st.sidebar.radio("Navigation", ["Register Face", "Take Attendance"])
