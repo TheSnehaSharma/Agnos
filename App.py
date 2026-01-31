@@ -1,167 +1,86 @@
 import streamlit as st
-import pandas as pd
-import cv2
-import numpy as np
 import base64
 import os
-import pickle
-import gzip
-import urllib.parse
-from deepface import DeepFace
-from datetime import datetime
+import cv2
+import numpy as np
 
-# --- CONFIG & DIRS ---
-DB_FOLDER = "registered_faces"
-PKL_LOG = "attendance_data.pkl"
-MODEL_NAME = "Facenet512"
+st.set_page_config(page_title="Bridge Debugger", layout="wide")
 
-for folder in [DB_FOLDER]:
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-
-st.set_page_config(page_title="Iron-Vision Live", layout="wide")
-
-# --- AI CACHE ---
-@st.cache_resource
-def load_ai():
-    DeepFace.build_model(MODEL_NAME)
-    return True
-
-load_ai()
-
-# --- HELPERS ---
-def decompress_frame(data):
-    try:
-        raw = base64.b64decode(urllib.parse.unquote(data))
-        decompressed = gzip.decompress(raw)
-        nparr = np.frombuffer(decompressed, np.uint8)
-        return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    except: return None
-
-# --- JS: CONTINUOUS LIVE FEED + RECTANGLE ---
-# This code runs independently in the browser. It doesn't wait for Python.
-JS_FEED_CODE = """
-<div style="position:relative; width:100%; max-width:500px; margin:auto; background:#000; border-radius:20px; overflow:hidden; border:3px solid #333;">
-    <video id="v" autoplay playsinline style="display:none;"></video>
-    <canvas id="d" style="width:100%; height:auto; display:block;"></canvas>
-    <div id="stat" style="position:absolute; top:15px; left:15px; color:#0F0; font-family:monospace; font-size:14px; text-shadow:2px 2px #000;">SYSTEM: LIVE</div>
+# --- JS BRIDGE (DEBUG VERSION) ---
+JS_DEBUG_CODE = """
+<div style="background:#000; border-radius:10px; overflow:hidden;">
+    <video id="v" autoplay playsinline style="width:100%; height:auto;"></video>
+    <canvas id="c" style="display:none;"></canvas>
 </div>
-
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
-
 <script>
     const v = document.getElementById('v');
-    const d = document.getElementById('d');
-    const ctx = d.getContext('2d');
-    const stat = document.getElementById('stat');
+    const c = document.getElementById('c');
+    const ctx = c.getContext('2d');
 
-    const faceDetection = new FaceDetection({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
-    });
+    navigator.mediaDevices.getUserMedia({ video: { width: 160, height: 120 } })
+        .then(s => v.srcObject = s);
 
-    faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.6 });
-
-    faceDetection.onResults((results) => {
-        d.width = v.videoWidth; d.height = v.videoHeight;
-        ctx.drawImage(v, 0, 0, d.width, d.height);
-        
-        if (results.detections.length > 0) {
-            const bbox = results.detections[0].boundingBox;
+    function send() {
+        if (v.readyState === v.HAVE_ENOUGH_DATA) {
+            c.width = 160; c.height = 120;
+            ctx.drawImage(v, 0, 0, 160, 120);
+            const data = c.toDataURL('image/jpeg', 0.1); // Ultra low quality for testing
             
-            // 1. DRAW LIVE RECTANGLE (NO LAG)
-            ctx.strokeStyle = "#00FF00";
-            ctx.lineWidth = 4;
-            ctx.strokeRect(
-                bbox.xCenter * d.width - (bbox.width * d.width / 2),
-                bbox.yCenter * d.height - (bbox.height * d.height / 2),
-                bbox.width * d.width, bbox.height * d.height
-            );
-
-            // 2. SEND DATA TO PYTHON (IN BACKGROUND)
-            const c = document.createElement('canvas');
-            c.width = 160; c.height = 160;
-            c.getContext('2d').drawImage(v, 
-                bbox.xCenter * v.videoWidth - (bbox.width * v.videoWidth / 2), 
-                bbox.yCenter * v.videoHeight - (bbox.height * v.videoHeight / 2), 
-                bbox.width * v.videoWidth, bbox.height * v.videoHeight,
-                0, 0, 160, 160
-            );
-            
-            const data = c.toDataURL('image/jpeg', 0.3);
-            const bytes = Uint8Array.from(atob(data.split(',')[1]), c => c.charCodeAt(0));
-            const comp = btoa(String.fromCharCode.apply(null, pako.gzip(bytes)));
-            
-            // This is the bridge back to Streamlit variable
-            window.parent.postMessage({type: "streamlit:setComponentValue", value: encodeURIComponent(comp)}, "*");
+            // Sending to Streamlit
+            window.parent.postMessage({
+                type: "streamlit:setComponentValue",
+                value: data
+            }, "*");
         }
-    });
-
-    const camera = new Camera(v, {
-        onFrame: async () => { await faceDetection.send({image: v}); },
-        width: 640, height: 480
-    });
-    camera.start();
+    }
+    setInterval(send, 2000); // Send every 2 seconds
 </script>
 """
 
-# --- NAVIGATION ---
-page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Logs"])
+st.title("🛰️ Bridge Diagnostic")
 
-if page == "Register":
-    st.header("👤 Face Registration")
-    with st.form("reg"):
-        name = st.text_input("Name").upper()
-        file = st.file_uploader("Photo", type=['jpg','png'])
-        if st.form_submit_button("Save"):
-            if name and file:
-                with open(os.path.join(DB_FOLDER, f"{name}.jpg"), "wb") as f:
-                    f.write(file.getbuffer())
-                for p in [f for f in os.listdir(DB_FOLDER) if f.endswith('.pkl')]:
-                    os.remove(os.path.join(DB_FOLDER, p))
-                st.success(f"Registered {name}")
+col_cam, col_data = st.columns(2)
 
-    st.subheader("🗂️ Database Management")
-    for f in [f for f in os.listdir(DB_FOLDER) if f.endswith(('.jpg', '.png'))]:
-        c1, c2 = st.columns([4, 1])
-        c1.write(f"✅ {f.split('.')[0]}")
-        if c2.button("Delete", key=f"del_{f}"):
-            os.remove(os.path.join(DB_FOLDER, f))
-            st.rerun()
+with col_cam:
+    st.subheader("Browser Feed")
+    # We call the component but DON'T assign it to a variable yet to avoid the TypeError
+    st.components.v1.html(JS_DEBUG_CODE, height=250)
 
-elif page == "Live Feed":
-    st.header("📹 Live Biometric Scanner")
-    col_v, col_s = st.columns([2, 1])
+with col_data:
+    st.subheader("Python Reception")
     
-    with col_v:
-        # THE BRIDGE: This is the ONLY component that can return a value
-        # We must use a key to maintain state
-        img_data = st.components.v1.html(JS_FEED_CODE, height=450, key="cam_bridge")
+    # Workaround: Use a fragment or experimental state to catch the value
+    # If the standard html() call is crashing, it's because it's not a bi-directional component.
+    st.warning("If the data below is 'None', the standard HTML component is blocking the return path.")
+    
+    # Let's try to capture the data safely
+    try:
+        # In standard Streamlit, st.components.v1.html RETURNS NOTHING.
+        # This is why your code was failing. 
+        res = st.components.v1.html(JS_DEBUG_CODE, height=0) 
+        st.write(f"Raw Component Return: {type(res)}") 
+    except Exception as e:
+        st.error(f"Handshake Error: {e}")
 
-    with col_s:
-        st.subheader("AI Analysis")
-        if img_data:
-            frame = decompress_frame(img_data)
-            if frame is not None:
-                try:
-                    res = DeepFace.find(img_path=frame, db_path=DB_FOLDER, 
-                                       model_name=MODEL_NAME, enforce_detection=False, 
-                                       detector_backend="skip", silent=True)
-                    if len(res) > 0 and not res[0].empty:
-                        m_name = os.path.basename(res[0].iloc[0]['identity']).split('.')[0]
-                        acc = max(0, int((1 - res[0].iloc[0]['distance']/0.38) * 100))
-                        if acc > 30:
-                            st.metric("Identity", m_name, f"{acc}% Match")
-                            # Add logging logic here...
-                        else: st.warning("Identity Unknown")
-                    else: st.info("Scanning...")
-                except: st.error("Engine Busy...")
-        else:
-            st.info("Awaiting Camera Permissions...")
+# --- THE REAL WORKAROUND ---
+st.markdown("---")
+st.info("💡 **The Diagnosis:** Standard `st.components.v1.html` is a one-way street. To get data back, we MUST use a custom component wrapper.")
 
-elif page == "Logs":
-    st.header("📊 Attendance Log")
-    if os.path.exists(PKL_LOG):
-        with open(PKL_LOG, "rb") as f: data = pickle.load(f)
-        st.table(pd.DataFrame(data))
+# This is a lightweight bridge that works in Streamlit
+from streamlit_gsheets import GSheetsConnection # Just checking environment
+
+# Let's try the simplest possible bi-directional hack: st.text_input + JS Injection
+st.subheader("Manual Bridge Test")
+bridge_input = st.text_input("Hidden Bridge", key="my_bridge")
+
+st.write(f"Current Bridge String Length: {len(bridge_input)}")
+
+if len(bridge_input) > 100:
+    st.success("✅ DATA DETECTED IN PYTHON!")
+    # Try to decode just to prove it works
+    try:
+        header, encoded = bridge_input.split(",", 1)
+        data = base64.b64decode(encoded)
+        st.write(f"Byte count: {len(data)}")
+    except:
+        st.error("Data received but decoding failed.")
