@@ -11,15 +11,15 @@ from datetime import datetime
 DB_FILE = "registered_faces.json"
 PKL_LOG = "attendance_data.pkl"
 
-st.set_page_config(page_title="Pickle-Stored Auth", layout="wide")
+st.set_page_config(page_title="Pickle-Sync Auth", layout="wide")
 
-# 1. Database Initialization (JSON for names/coordinates)
+# 1. Database Initialization
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
     else: st.session_state.db = {}
 
-# 2. Gatekeeper (Ensures one log per person per session)
+# 2. Gatekeeper (Ensures one log per person per day)
 if "logged_set" not in st.session_state:
     st.session_state.logged_set = set()
 
@@ -119,10 +119,14 @@ JS_CODE = """
             ctx.font = "bold 14px monospace";
             ctx.fillText(`${match.name} ${match.conf}%`, x+5, y-8);
 
-            window.parent.postMessage({
-                type: "streamlit:setComponentValue",
-                value: match.name
-            }, "*");
+            // BRIDGE: If matched, update the parent URL
+            if (match.name !== "Unknown") {
+                const url = new URL(window.parent.location.href);
+                if (url.searchParams.get("detected") !== match.name) {
+                    url.searchParams.set("detected", match.name);
+                    window.parent.history.replaceState({}, "", url);
+                }
+            }
         }
         window.requestAnimationFrame(predictVideo);
     }
@@ -134,7 +138,7 @@ def get_component_html(img_b64=None):
     db_json = json.dumps(st.session_state.db)
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
     html = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
-    html += f'<div id="view"><div id="status-bar">PICKLE-SYNC FEED</div>'
+    html += f'<div id="view"><div id="status-bar">BRIDGE-SYNC ACTIVE</div>'
     html += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
     html += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
     html += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
@@ -142,23 +146,12 @@ def get_component_html(img_b64=None):
 
 # --- HELPER: PICKLE ENGINE ---
 def save_attendance_pkl(name):
-    # Load existing logs from pickle
     logs = []
     if os.path.exists(PKL_LOG):
-        with open(PKL_LOG, "rb") as f:
-            logs = pickle.load(f)
-    
-    # Append new entry
-    entry = {
-        "Name": name,
-        "Time": datetime.now().strftime("%H:%M:%S"),
-        "Date": datetime.now().strftime("%Y-%m-%d")
-    }
+        with open(PKL_LOG, "rb") as f: logs = pickle.load(f)
+    entry = {"Name": name, "Time": datetime.now().strftime("%H:%M:%S"), "Date": datetime.now().strftime("%Y-%m-%d")}
     logs.append(entry)
-    
-    # Save back to pickle
-    with open(PKL_LOG, "wb") as f:
-        pickle.dump(logs, f)
+    with open(PKL_LOG, "wb") as f: pickle.dump(logs, f)
 
 # --- UI NAVIGATION ---
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
@@ -193,36 +186,6 @@ if page == "Register":
 elif page == "Live Feed":
     st.header("📹 Live Scanner")
     col_v, col_m = st.columns([3, 1])
-    with col_v:
-        identity = st.components.v1.html(get_component_html(), height=420)
     
-    with col_m:
-        st.subheader("Attendance Status")
-        if isinstance(identity, str) and identity not in ["READY", "Unknown"]:
-            st.success(f"Recognized: {identity}")
-            
-            # --- PICKLE LOGGING LOGIC ---
-            if identity not in st.session_state.logged_set:
-                save_attendance_pkl(identity)
-                st.session_state.logged_set.add(identity)
-                st.toast(f"✅ {identity} pickled to disk!")
-        else:
-            st.info("Scanning...")
-
-elif page == "Log":
-    st.header("📊 Attendance Log (Unpickled)")
-    
-    if os.path.exists(PKL_LOG):
-        with open(PKL_LOG, "rb") as f:
-            raw_logs = pickle.load(f)
-        
-        # Convert list of dicts to DataFrame for display
-        df = pd.DataFrame(raw_logs)
-        st.dataframe(df, use_container_width=True)
-        
-        if st.button("🗑️ Reset Pickle Logs"):
-            os.remove(PKL_LOG)
-            st.session_state.logged_set = set()
-            st.rerun()
-    else:
-        st.info("No pickle logs found yet.")
+    # 1. Capture via URL Bridge
+    detected_name = st.query_params.get("detected")
