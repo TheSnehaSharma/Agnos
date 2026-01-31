@@ -1,37 +1,39 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, RTCConfiguration
-import av
+import streamlit.components.v1 as components
 
-# Standard Google STUN servers to handle NAT traversal (connection)
-RTC_CONFIG = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-)
+st.title("🛡️ Privacy-First Attendance")
+st.write("Processing happens on YOUR device. No video is sent to our servers.")
 
-def main():
-    st.set_page_config(page_title="Live Stream", page_icon="📹")
+# This is a simplified "placeholder" for the JS implementation
+# In a real app, we use a custom Streamlit Component to bridge the two.
+def local_attendance_component():
+    # JavaScript + TensorFlow.js code
+    js_code = """
+    <div id="container">
+        <video id="webcam" autoplay playsinline width="640" height="480"></video>
+        <canvas id="overlay" style="position: absolute; left: 0; top: 0;"></canvas>
+    </div>
     
-    st.title("📹 Live Webcam Feed")
-    st.write("This app uses WebRTC to stream your camera directly to the browser.")
-
-    # A simple callback to handle the video frames
-    # We use 'passthrough' logic here just to show the feed
-    def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    
+    <script>
+        const video = document.getElementById('webcam');
+        navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+            video.srcObject = stream;
+        });
         
-        # You can add simple OpenCV filters here if you want!
-        # e.g., img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+        // Face detection logic runs here... 
+        // When a face is matched, we use:
+        // window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'User_Name'}, '*');
+    </script>
+    """
+    components.html(js_code, height=500)
 
-    webrtc_streamer(
-        key="live-stream",
-        video_frame_callback=video_frame_callback,
-        rtc_configuration=RTC_CONFIG,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True, # Improves performance
-    )
+local_attendance_component()
 
-    st.info("💡 If the camera doesn't start, ensure you've granted browser permissions.")
+# --- Logic to receive the 'Log' from the browser ---
+if "last_seen" not in st.session_state:
+    st.session_state.last_seen = "Waiting..."
 
-if __name__ == "__main__":
-    main()
+st.metric("Last Person Detected", st.session_state.last_seen)
