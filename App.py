@@ -1,42 +1,44 @@
 import streamlit as st
+import pandas as pd
 import json
 import base64
-import pandas as pd
-from datetime import datetime
+import os
 
-# --- 1. CONFIG & STATE ---
-st.set_page_config(page_title="Privacy-First AI", layout="wide")
+# --- 1. INITIALIZATION ---
 DB_FILE = "registered_faces.json"
-FACE_API_JS = "https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js"
 
 if 'registered_users' not in st.session_state:
-    st.session_state.registered_users = [] # Load from DB_FILE in production
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f:
+            st.session_state.registered_users = json.load(f)
+    else:
+        st.session_state.registered_users = []
 
-# --- 2. REGISTRATION (ENCODE ON CLIENT) ---
+# --- 2. REGISTRATION PAGE ---
 def registration_page():
-    st.title("👤 100% Local Registration")
-    st.info("The DeepFace-style 'Facenet' model runs inside your browser. Your image never leaves this tab.")
-
-    name = st.text_input("Full Name").strip().upper()
-    img_file = st.file_uploader("Upload Face Photo", type=['jpg', 'png', 'jpeg'])
+    st.title("👤 Local Privacy Registration")
+    
+    name = st.text_input("Enter Full Name").strip().upper()
+    img_file = st.file_uploader("Upload Profile Photo", type=['jpg', 'png', 'jpeg'])
 
     if img_file and name:
         img_base64 = base64.b64encode(img_file.read()).decode()
         
-        # We use the tfjs-models which are the browser equivalent of DeepFace
+        # This component handles LOCAL encoding
         js_code = f"""
-        <div id="status" style="padding:10px; background:#f0f2f6; border-radius:5px; font-family:sans-serif;">
-            ⏳ Loading Local AI Engine...
+        <div id="status-box" style="padding:10px; background:#f0f2f6; border-radius:8px; font-family:sans-serif;">
+            <div id="status-text" style="color:#ff4b4b; font-weight:bold;">⏳ Initializing Local AI...</div>
         </div>
+
         <script type="module">
-            // Loading TensorFlow.js and the Face Recognition model
-            import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs';
             import * as faceapi from 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.esm.js';
 
-            async function run() {{
-                const status = document.getElementById('status');
+            const status = document.getElementById('status-text');
+            const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
+
+            async function init() {{
                 try {{
-                    const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
+                    status.innerText = "Loading Models...";
                     await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
@@ -47,29 +49,50 @@ def registration_page():
                     img.onload = async () => {{
                         const det = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
                         if (det) {{
-                            // Only the 128-digit array (the vector) is sent back
+                            // Send ONLY the 128-digit vector back to Streamlit
                             window.parent.postMessage({{
                                 type: 'streamlit:setComponentValue', 
                                 value: Array.from(det.descriptor)
                             }}, '*');
-                            status.innerText = "✅ Encoding Complete!";
-                        }} else {{
-                            status.innerText = "❌ No face detected.";
+                            status.innerText = "✅ Encoding Complete! Click 'Register' below.";
+                        } else {{
+                            status.innerText = "❌ Error: No face detected.";
                         }}
                     }};
                 }} catch (e) {{
-                    status.innerText = "❌ AI Blocked by Browser. Please disable 'Tracking Prevention' or use Incognito.";
+                    status.innerText = "❌ AI Blocked. Please check browser shield.";
                 }}
             }}
-            run();
+            init();
         </script>
         """
+        # THE FIX: Capture the value returned from the component
         extracted_vector = st.components.v1.html(js_code, height=100)
 
+        # Show the actual Register button only if the vector exists
         if extracted_vector and isinstance(extracted_vector, list):
-            if st.button(f"Save {name}'s Face Map"):
-                st.session_state.registered_users.append({{"name": name, "encoding": extracted_vector}})
-                st.success("Successfully registered!")
+            st.success(f"Mathematical features extracted for {name}")
+            
+            if st.button(f"Confirm Registration for {name}"):
+                # 1. Update Session State
+                new_user = {"name": name, "encoding": extracted_vector}
+                st.session_state.registered_users.append(new_user)
+                
+                # 2. Save to permanent JSON file
+                with open(DB_FILE, "w") as f:
+                    json.dump(st.session_state.registered_users, f)
+                
+                st.success(f"✅ {name} added to database!")
+                st.rerun()
+
+    st.write("---")
+    st.subheader("Recently Registered Users")
+    if st.session_state.registered_users:
+        # Show table of registered names
+        df = pd.DataFrame(st.session_state.registered_users)
+        st.table(df[['name']].tail(10))
+    else:
+        st.info("No users registered in local database.")
 # --- 3. ATTENDANCE PAGE ---
 def attendance_page():
     st.title("📹 Live Privacy Scanner")
