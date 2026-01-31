@@ -4,25 +4,24 @@ import json
 import numpy as np
 import os
 import base64
+import pickle
 from datetime import datetime
 
 # --- CONFIG & STORAGE ---
 DB_FILE = "registered_faces.json"
-LOG_FILE = "attendance_log.csv"
+PKL_LOG = "attendance_data.pkl"
 
-st.set_page_config(page_title="Biometric Scanner Pro", layout="wide")
+st.set_page_config(page_title="Pickle-Stored Auth", layout="wide")
 
-# Persistent Storage Initialization
+# 1. Database Initialization (JSON for names/coordinates)
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
     else: st.session_state.db = {}
 
-if "logs" not in st.session_state:
-    if os.path.exists(LOG_FILE):
-        try: st.session_state.logs = pd.read_csv(LOG_FILE)
-        except: st.session_state.logs = pd.DataFrame(columns=["Name", "Time", "Date"])
-    else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time", "Date"])
+# 2. Gatekeeper (Ensures one log per person per session)
+if "logged_set" not in st.session_state:
+    st.session_state.logged_set = set()
 
 # --- ASSETS ---
 CSS_CODE = """
@@ -120,7 +119,6 @@ JS_CODE = """
             ctx.font = "bold 14px monospace";
             ctx.fillText(`${match.name} ${match.conf}%`, x+5, y-8);
 
-            // SEND TO PYTHON
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: match.name
@@ -136,19 +134,37 @@ def get_component_html(img_b64=None):
     db_json = json.dumps(st.session_state.db)
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
     html = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
-    html += f'<div id="view"><div id="status-bar">SECURE BIO-FEED</div>'
+    html += f'<div id="view"><div id="status-bar">PICKLE-SYNC FEED</div>'
     html += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
     html += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
     html += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
     return html.replace("STATIC_IMG_PLACEHOLDER", img_val).replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO").replace("DB_JSON_PLACEHOLDER", db_json)
+
+# --- HELPER: PICKLE ENGINE ---
+def save_attendance_pkl(name):
+    # Load existing logs from pickle
+    logs = []
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG, "rb") as f:
+            logs = pickle.load(f)
+    
+    # Append new entry
+    entry = {
+        "Name": name,
+        "Time": datetime.now().strftime("%H:%M:%S"),
+        "Date": datetime.now().strftime("%Y-%m-%d")
+    }
+    logs.append(entry)
+    
+    # Save back to pickle
+    with open(PKL_LOG, "wb") as f:
+        pickle.dump(logs, f)
 
 # --- UI NAVIGATION ---
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
     st.header("👤 Face Registration")
-    
-    # 1. Registration Form
     name = st.text_input("Full Name").upper()
     uploaded = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'])
     if uploaded:
@@ -165,65 +181,48 @@ if page == "Register":
             st.rerun()
 
     st.markdown("---")
-    
-    # 2. Database Management (Moved Below)
     st.subheader("🗂️ Manage Database")
-    if st.session_state.db:
-        for reg_name in list(st.session_state.db.keys()):
-            col_n, col_b = st.columns([4, 1])
-            col_n.write(f"✅ {reg_name}")
-            if col_b.button("Delete", key=f"del_{reg_name}"):
-                del st.session_state.db[reg_name]
-                with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
-                st.rerun()
-    else:
-        st.info("The database is currently empty.")
+    for reg_name in list(st.session_state.db.keys()):
+        col_n, col_b = st.columns([4, 1])
+        col_n.write(f"✅ {reg_name}")
+        if col_b.button("Delete", key=f"del_{reg_name}"):
+            del st.session_state.db[reg_name]
+            with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
+            st.rerun()
 
 elif page == "Live Feed":
     st.header("📹 Live Scanner")
     col_v, col_m = st.columns([3, 1])
     with col_v:
-        # Catching the identity string directly from the component
         identity = st.components.v1.html(get_component_html(), height=420)
     
     with col_m:
-        st.subheader("Real-time Stats")
+        st.subheader("Attendance Status")
         if isinstance(identity, str) and identity not in ["READY", "Unknown"]:
-            st.metric("Detected", identity)
+            st.success(f"Recognized: {identity}")
             
-            # --- PERSISTENT LOGGING LOGIC ---
-            today_date = datetime.now().strftime("%Y-%m-%d")
-            
-            # Create a session-based log tracker if it doesn't exist
-            if "logged_today" not in st.session_state:
-                st.session_state.logged_today = set()
-            
-            if identity not in st.session_state.logged_today:
-                now_time = datetime.now().strftime("%H:%M:%S")
-                
-                # Update Session Dataframe
-                new_row = pd.DataFrame({"Name": [identity], "Time": [now_time], "Date": [today_date]})
-                st.session_state.logs = pd.concat([st.session_state.logs, new_row], ignore_index=True)
-                
-                # Write to Physical CSV File
-                st.session_state.logs.to_csv(LOG_FILE, index=False)
-                
-                # Mark as logged for this session
-                st.session_state.logged_today.add(identity)
-                st.toast(f"✅ Logged attendance for {identity}")
+            # --- PICKLE LOGGING LOGIC ---
+            if identity not in st.session_state.logged_set:
+                save_attendance_pkl(identity)
+                st.session_state.logged_set.add(identity)
+                st.toast(f"✅ {identity} pickled to disk!")
         else:
-            st.metric("Detected", "Searching...")
+            st.info("Scanning...")
 
 elif page == "Log":
-    st.header("📊 Attendance History")
-    st.dataframe(st.session_state.logs, use_container_width=True)
+    st.header("📊 Attendance Log (Unpickled)")
     
-    col_d, col_c = st.columns(2)
-    with col_d:
-        csv_data = st.session_state.logs.to_csv(index=False)
-        st.download_button("📥 Download Full CSV", csv_data, "attendance_report.csv", "text/csv")
-    with col_c:
-        if st.button("🗑️ Clear All Logs"):
-            st.session_state.logs = pd.DataFrame(columns=["Name", "Time", "Date"])
-            st.session_state.logs.to_csv(LOG_FILE, index=False)
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG, "rb") as f:
+            raw_logs = pickle.load(f)
+        
+        # Convert list of dicts to DataFrame for display
+        df = pd.DataFrame(raw_logs)
+        st.dataframe(df, use_container_width=True)
+        
+        if st.button("🗑️ Reset Pickle Logs"):
+            os.remove(PKL_LOG)
+            st.session_state.logged_set = set()
             st.rerun()
+    else:
+        st.info("No pickle logs found yet.")
