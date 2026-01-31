@@ -31,18 +31,10 @@ def registration_page():
     
     if 'reg_stage' not in st.session_state:
         st.session_state.reg_stage = "idle"
-    if 'temp_encoding' not in st.session_state:
-        st.session_state.temp_encoding = None
-
+    
     name = st.text_input("Enter Full Name").strip().upper()
     img_file = st.file_uploader("Upload Profile Photo", type=['jpg', 'png', 'jpeg'])
     
-    # Reset button if stuck
-    if st.session_state.reg_stage != "idle":
-        if st.sidebar.button("Reset Registration"):
-            st.session_state.reg_stage = "idle"
-            st.rerun()
-
     if st.session_state.reg_stage == "idle":
         if st.button("Step 1: Encode Face"):
             if name and img_file:
@@ -52,25 +44,29 @@ def registration_page():
                 st.warning("Please provide a name and photo first.")
 
     elif st.session_state.reg_stage == "encoding":
-        st.warning("🧬 AI is working... If this takes more than 15 seconds, check your internet or refresh.")
+        st.warning("🧬 Processing... If blocked by browser, click the 'Shield' icon in your URL bar and allow 'Tracking'.")
         img_base64 = base64.b64encode(img_file.read()).decode()
         
-        # We use a standard string to avoid f-string curly brace errors
+        # We use a standard string. Using a different CDN (Cloudflare/cdnjs) 
+        # which is rarely flagged by Tracking Prevention.
         raw_js = """
-        <div id="status" style="font-family:sans-serif; font-size:12px; color:gray;">Initializing AI...</div>
-        <script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+        <div id="status" style="font-family:sans-serif; font-size:13px; color:#ff4b4b; padding:10px; background:#f0f2f6; border-radius:5px;">
+            Initializing Local AI Engine...
+        </div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js"></script>
         <script>
             async function process() {
                 const status = document.getElementById('status');
                 try {
-                    // Alternative CDN for model weights
-                    const URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
-                    status.innerText = "Loading Models...";
+                    // Using a more reliable weight source
+                    const URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
+                    
+                    status.innerText = "Step 1: Downloading AI Weights...";
                     await faceapi.nets.ssdMobilenetv1.loadFromUri(URL);
                     await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
                     await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
                     
-                    status.innerText = "Analyzing Face...";
+                    status.innerText = "Step 2: Analyzing Facial Geometry...";
                     const img = new Image();
                     img.src = "data:image/jpeg;base64,IMG_DATA";
                     img.onload = async () => {
@@ -80,32 +76,30 @@ def registration_page():
                                 type: 'streamlit:setComponentValue', 
                                 value: Array.from(det.descriptor)
                             }, '*');
+                            status.innerText = "✅ Encoding Ready!";
                         } else {
                             window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'ERR_NO_FACE'}, '*');
                         }
                     };
                 } catch (e) {
-                    status.innerText = "ERROR: " + e.message;
-                    window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'ERR_LOAD'}, '*');
+                    status.innerText = "ERROR: Browser blocked AI download. Try Incognito mode or disable 'Strict Tracking Prevention'.";
+                    console.error(e);
                 }
             }
             process();
         </script>
         """
         js_component = raw_js.replace("IMG_DATA", img_base64)
-        data_from_js = st.components.v1.html(js_component, height=50)
+        data_from_js = st.components.v1.html(js_component, height=100)
 
         if data_from_js:
-            if data_from_js == "ERR_NO_FACE":
-                st.error("❌ No face detected. Try a clearer/brighter photo.")
-                st.session_state.reg_stage = "idle"
-            elif data_from_js == "ERR_LOAD":
-                st.error("❌ AI Models could not load. Check your firewall/VPN.")
-                st.session_state.reg_stage = "idle"
-            elif isinstance(data_from_js, list):
+            if isinstance(data_from_js, list):
                 st.session_state.temp_encoding = data_from_js
                 st.session_state.reg_stage = "ready"
                 st.rerun()
+            elif data_from_js == "ERR_NO_FACE":
+                st.error("❌ No face detected. Use a solo photo with good lighting.")
+                st.session_state.reg_stage = "idle"
 
     elif st.session_state.reg_stage == "ready":
         st.success(f"✅ Encoding Complete for {name}!")
@@ -115,8 +109,7 @@ def registration_page():
             with open(DB_FILE, "w") as f:
                 json.dump(st.session_state.registered_users, f)
             st.session_state.reg_stage = "idle"
-            st.session_state.temp_encoding = None
-            st.success(f"User {name} added to database!")
+            st.success(f"User {name} added to local database!")
             st.rerun()
         
 # --- 3. ATTENDANCE PAGE --- (Keep as is since you said feed works)
