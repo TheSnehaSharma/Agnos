@@ -1,5 +1,5 @@
 import streamlit as st
-import pandas as pd
+import pd
 import json
 import numpy as np
 import os
@@ -10,7 +10,7 @@ from datetime import datetime
 DB_FILE = "registered_faces.json"
 LOG_FILE = "attendance_log.csv"
 
-st.set_page_config(page_title="Privacy Face Auth", layout="wide")
+st.set_page_config(page_title="Python-Matched Face Auth", layout="wide")
 
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
@@ -27,7 +27,7 @@ if "logs" not in st.session_state:
 
 CSS_CODE = """
 <style>
-    body { margin:0; background: #0e1117; color: #00FF00; font-family: monospace; }
+    body { margin:0; background: #0e1117; color: #00FF00; font-family: monospace; overflow: hidden; }
     #view { position: relative; width: 100%; height: 400px; border-radius: 12px; overflow: hidden; background: #000; border: 1px solid #333; }
     video, canvas, img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
     #status-bar { position: absolute; top: 0; left: 0; right: 0; background: rgba(0,0,0,0.8); padding: 8px; font-size: 11px; z-index: 100; }
@@ -89,6 +89,8 @@ JS_CODE = """
 
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
+            
+            // Send landmarks to Python for recognition
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
@@ -96,13 +98,29 @@ JS_CODE = """
         }
         window.requestAnimationFrame(predictVideo);
     }
+    
+    // Listen for Python's Drawing Instructions
+    window.addEventListener("message", (e) => {
+        if (e.data.type === "draw_box") {
+            const { x, y, w, h, label, color } = e.data;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = color; ctx.lineWidth = 4;
+            ctx.strokeRect(x, y, w, h);
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y - 25, w, 25);
+            ctx.fillStyle = "white";
+            ctx.font = "bold 14px monospace";
+            ctx.fillText(label, x + 5, y - 8);
+        }
+    });
+
     init();
 </script>
 """
 
 def get_component_html(img_b64=None):
     html_template = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
-    html_template += f'<div id="view"><div id="status-bar">SYSTEM ONLINE</div>'
+    html_template += f'<div id="view"><div id="status-bar">PYTHON-MATCHED FEED</div>'
     html_template += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
     html_template += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
     html_template += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
@@ -115,72 +133,84 @@ page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
     st.header("👤 Identity Registration")
-    name = st.text_input("Person Name", key="reg_name").upper()
-    uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'], key="uploader")
+    col_reg, col_list = st.columns([1, 1])
     
-    url_data = st.query_params.get("face_data")
-    if url_data:
-        try: st.session_state.reg_data = base64.b64decode(url_data).decode()
-        except: pass
-
-    if uploaded_file:
-        b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
-        st.components.v1.html(get_component_html(b64_img), height=420)
+    with col_reg:
+        name = st.text_input("Person Name").upper()
+        uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'])
         
-    if "reg_data" in st.session_state and name:
-        st.success(f"✅ Landmarks captured for {name}!")
-        if st.button("Confirm & Save"):
-            st.session_state.db[name] = json.loads(st.session_state.reg_data)
-            with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
-            st.query_params.clear()
-            if "reg_data" in st.session_state: del st.session_state.reg_data
-            st.success(f"Registered {name}!")
-            st.rerun()
+        url_data = st.query_params.get("face_data")
+        if url_data:
+            try: st.session_state.reg_data = base64.b64decode(url_data).decode()
+            except: pass
 
-    st.markdown("---")
-    st.subheader("📜 Recent Registrations")
-    if st.session_state.db:
-        st.table(pd.DataFrame(list(st.session_state.db.keys())[::-1][:10], columns=["Name"]))
+        if uploaded_file:
+            b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
+            st.components.v1.html(get_component_html(b64_img), height=420)
+            
+        if "reg_data" in st.session_state and name:
+            st.success(f"✅ Facial landmarks captured for {name}!")
+            if st.button("Confirm & Save"):
+                st.session_state.db[name] = json.loads(st.session_state.reg_data)
+                with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
+                st.query_params.clear()
+                if "reg_data" in st.session_state: del st.session_state.reg_data
+                st.success(f"Registered {name}!")
+                st.rerun()
+
+    with col_list:
+        st.subheader("👥 Registered Users")
+        for reg_name in list(st.session_state.db.keys()):
+            c1, c2 = st.columns([3, 1])
+            c1.write(reg_name)
+            if c2.button("🗑️", key=f"del_{reg_name}"):
+                del st.session_state.db[reg_name]
+                with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
+                st.rerun()
 
 elif page == "Live Feed":
-    st.header("📹 Live Attendance Terminal")
-    col1, col2 = st.columns([3, 1])
+    st.header("📹 Attendance Terminal")
+    col_feed, col_stat = st.columns([3, 1])
     
-    with col1:
+    with col_feed:
         feed_val = st.components.v1.html(get_component_html(), height=420)
     
-    with col2:
+    with col_stat:
         if isinstance(feed_val, str) and feed_val != "READY":
-            current_face = json.loads(feed_val)
+            landmarks = json.loads(feed_val)
+            
+            # 1. PYTHON RECOGNITION LOGIC
             identified = "Unknown"
             highest_conf = 0
             
+            # Simple geometric comparison
             for db_name, saved_face in st.session_state.db.items():
-                curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
-                save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
-                dist = np.mean(np.linalg.norm(curr_arr - save_arr, axis=1))
+                curr_pts = np.array([[p['x'], p['y']] for p in landmarks[:30]])
+                save_pts = np.array([[p['x'], p['y']] for p in saved_face[:30]])
+                dist = np.mean(np.linalg.norm(curr_pts - save_pts, axis=1))
                 
                 conf = max(0, int((1 - (dist / 0.05)) * 100))
                 if dist < 0.05 and conf > highest_conf:
                     identified = db_name
                     highest_conf = conf
 
-            st.metric("Detected", identified, f"{highest_conf}% Match" if highest_conf > 0 else None)
-
-            # --- LOGGING TRIGGER ---
+            # 2. CALCULATE OVERLAY BOX (normalized to canvas scale)
+            xs = [p['x'] * 640 for p in landmarks] # Assuming 640x480 for calculation
+            ys = [p['y'] * 480 for p in landmarks]
+            x, y, w, h = min(xs), min(ys), max(xs)-min(xs), max(ys)-min(ys)
+            
+            # 3. ROBUST LOGGING
             if identified != "Unknown":
-                if "logged_today" not in st.session_state:
-                    st.session_state.logged_today = set()
-                
+                if "logged_today" not in st.session_state: st.session_state.logged_today = set()
                 if identified not in st.session_state.logged_today:
-                    now_time = datetime.now().strftime("%H:%M:%S")
-                    new_entry = pd.DataFrame({"Name": [identified], "Time": [now_time]})
+                    new_entry = pd.DataFrame({"Name": [identified], "Time": [datetime.now().strftime("%H:%M:%S")]})
                     st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
                     st.session_state.logs.to_csv(LOG_FILE, index=False)
                     st.session_state.logged_today.add(identified)
-                    st.toast(f"✅ Attendance Logged: {identified}")
+                    st.toast(f"✅ Logged: {identified}")
+
+            st.metric("Detected", identified, f"{highest_conf}% Match" if identified != "Unknown" else None)
 
 elif page == "Log":
-    st.header("📊 History")
+    st.header("📊 Attendance Log")
     st.dataframe(st.session_state.logs, use_container_width=True)
-    st.download_button("Export CSV", st.session_state.logs.to_csv(index=False), "attendance.csv")
