@@ -67,7 +67,6 @@ JS_CODE = """
                     const results = await faceLandmarker.detect(staticImg);
                     if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                         const landmarks = results.faceLandmarks[0];
-                        drawOverlay(landmarks, "EXTRACTED", 100);
                         const dataString = btoa(JSON.stringify(landmarks));
                         const url = new URL(window.parent.location.href);
                         url.searchParams.set("face_data", dataString);
@@ -97,27 +96,19 @@ JS_CODE = """
         }
         window.requestAnimationFrame(predictVideo);
     }
+    init();
+</script>
+"""
 
-    function drawOverlay(landmarks, name, conf) {
-        const xs = landmarks.map(p => p.x * canvas.width);
-        const ys = landmarks.map(p => p.y * canvas.height);
-        const minX = Math.min(...xs), maxX = Math.max(...xs);
-        const minY = Math.min(...ys), maxY = Math.max(...ys);
+def get_component_html(img_b64=None):
+    html_template = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
+    html_template += f'<div id="view"><div id="status-bar">SYSTEM ONLINE</div>'
+    html_template += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
+    html_template += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
+    html_template += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
+    img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
+    return html_template.replace("STATIC_IMG_PLACEHOLDER", img_val).replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO")
 
-        const isUnknown = name === "Unknown";
-        const color = isUnknown ? "#FF4B4B" : "#00FF00";
+# --- UI NAVIGATION ---
 
-        ctx.strokeStyle = color; ctx.lineWidth = 4;
-        ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
-        ctx.fillStyle = color;
-        ctx.fillRect(minX, minY - 25, maxX - minX, 25);
-        ctx.fillStyle = "white";
-        ctx.font = "bold 14px monospace";
-        ctx.fillText(name + " " + conf + "%", minX + 5, minY - 8);
-    }
-    
-    // Catch identity updates from Streamlit (via window messages)
-    window.addEventListener("message", (e) => {
-        if (e.data.type === "UPDATE_UI") {
-             // We can implement a more complex drawing sync here if needed
-        }
+page =
