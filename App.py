@@ -12,7 +12,6 @@ LOG_FILE = "attendance_log.csv"
 
 st.set_page_config(page_title="Privacy Face Auth", layout="wide")
 
-# Persistent Storage Initialization
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
@@ -84,6 +83,7 @@ JS_CODE = """
             const landmarks = results.faceLandmarks[0];
             drawRect(landmarks);
             log.innerText = "✅ ENCODING READY";
+            // Ensure we send a valid JSON string
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
@@ -136,23 +136,30 @@ if page == "Register":
     
     if uploaded_file:
         b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
-        # Capture the return value directly from the component
+        # The return value of the component is assigned to 'captured_json'
         captured_json = st.components.v1.html(get_component_html(b64_img), height=420)
         
-        # Buffer the data into session state
-        if captured_json:
+        # VALIDATION: Only update the buffer if the returned value is actually a string
+        if isinstance(captured_json, str):
             st.session_state.buffered_reg = captured_json
 
-    # Status & Save Logic
-    if "buffered_reg" in st.session_state and name:
+    # Check if we have a valid string in the session state buffer
+    is_ready = "buffered_reg" in st.session_state and isinstance(st.session_state.buffered_reg, str)
+
+    if is_ready and name:
         st.success(f"Encoding detected for {name}. You may now save.")
         if st.button("Confirm & Save to Database"):
-            st.session_state.db[name] = json.loads(st.session_state.buffered_reg)
-            with open(DB_FILE, "w") as f:
-                json.dump(st.session_state.db, f)
-            st.success(f"✅ {name} registered!")
-            del st.session_state.buffered_reg
-            st.rerun()
+            # Second safety check before parsing
+            data_to_parse = st.session_state.buffered_reg
+            if isinstance(data_to_parse, str):
+                st.session_state.db[name] = json.loads(data_to_parse)
+                with open(DB_FILE, "w") as f:
+                    json.dump(st.session_state.db, f)
+                st.success(f"✅ {name} registered!")
+                del st.session_state.buffered_reg
+                st.rerun()
+            else:
+                st.error("Data error: Buffer was corrupted. Please re-upload.")
     elif uploaded_file:
         st.info("Waiting for browser to send facial coordinates...")
 
@@ -162,7 +169,8 @@ elif page == "Live Feed":
     with col1:
         feed_val = st.components.v1.html(get_component_html(), height=420)
     with col2:
-        if feed_val:
+        # Check if the webcam feed is returning a string before parsing
+        if isinstance(feed_val, str):
             current_face = json.loads(feed_val)
             identified = "Unknown"
             for db_name, saved_face in st.session_state.db.items():
