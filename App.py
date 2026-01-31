@@ -5,12 +5,13 @@ import numpy as np
 import os
 from datetime import datetime
 
-# --- SETTINGS & PERSISTENCE ---
+# --- CONFIGURATION ---
 DB_FILE = "registered_faces.json"
 LOG_FILE = "attendance_log.csv"
 
 st.set_page_config(page_title="Privacy Face Auth", layout="wide")
 
+# Initialize Session States
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
@@ -20,7 +21,10 @@ if "logs" not in st.session_state:
     if os.path.exists(LOG_FILE): st.session_state.logs = pd.read_csv(LOG_FILE)
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
-# --- FRONTEND COMPONENT (RECTANGLE ONLY) ---
+if 'active_encoding' not in st.session_state:
+    st.session_state.active_encoding = None
+
+# --- COMPONENT CODE ---
 INTERFACE_CODE = """
 <!DOCTYPE html>
 <html>
@@ -68,16 +72,11 @@ INTERFACE_CODE = """
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (results.faceLandmarks.length > 0) {
                 const landmarks = results.faceLandmarks[0];
-                
-                // Calculate Bounding Box from landmarks
                 const xs = landmarks.map(p => p.x * canvas.width);
                 const ys = landmarks.map(p => p.y * canvas.height);
-                const minX = Math.min(...xs);
-                const maxX = Math.max(...xs);
-                const minY = Math.min(...ys);
-                const maxY = Math.max(...ys);
+                const minX = Math.min(...xs), maxX = Math.max(...xs);
+                const minY = Math.min(...ys), maxY = Math.max(...ys);
 
-                // Draw Rectangle Only
                 ctx.strokeStyle = "#00FF00";
                 ctx.lineWidth = 3;
                 ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
@@ -99,18 +98,44 @@ INTERFACE_CODE = """
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
-    st.header("👤 Register Identity")
-    name = st.text_input("Person Name").upper()
-    raw_data = st.components.v1.html(INTERFACE_CODE, height=420)
+    st.header("👤 Registration (Dual-Step)")
     
-    # Fix: Only attempt json.loads if raw_data is not None
-    if st.button("Save Face Print") and name:
-        if raw_data:
-            st.session_state.db[name] = json.loads(raw_data)
-            with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
-            st.success(f"Registered {name}!")
-        else:
-            st.error("Waiting for camera to detect face...")
+    name = st.text_input("Person Name").upper()
+    
+    # Render the component
+    res = st.components.v1.html(INTERFACE_CODE, height=420)
+    
+    # Continuous buffer update
+    if res:
+        st.session_state.active_encoding = res
+
+    # UI logic based on whether a face is being detected
+    if st.session_state.active_encoding:
+        st.success("✅ Face Detected & Encoded in Browser")
+        
+        # Step 1: Lock the data
+        if st.button("Step 1: Process Current Face"):
+            st.session_state['locked_encoding'] = st.session_state.active_encoding
+            st.info("Face geometry processed. Ready to save.")
+
+        # Step 2: Save to file
+        if 'locked_encoding' in st.session_state and name:
+            if st.button(f"Step 2: Save {name} to Database"):
+                try:
+                    encoding_list = json.loads(st.session_state['locked_encoding'])
+                    st.session_state.db[name] = encoding_list
+                    
+                    with open(DB_FILE, "w") as f:
+                        json.dump(st.session_state.db, f)
+                    
+                    st.success(f"Successfully saved {name} to {DB_FILE}!")
+                    # Cleanup
+                    del st.session_state['locked_encoding']
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Save failed: {e}")
+    else:
+        st.warning("🔍 Looking for face... Please center yourself in the frame.")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Feed")
@@ -124,7 +149,7 @@ elif page == "Live Feed":
             current_face = json.loads(current_data)
             identified = "Unknown"
             
-            # Compare with database
+            # Use only known names from the DB
             for name, saved_face in st.session_state.db.items():
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
@@ -134,16 +159,16 @@ elif page == "Live Feed":
                     identified = name
                     break
             
-            st.subheader(f"Status: {identified}")
+            st.subheader(f"Detected: {identified}")
             
-            # Fix: Only log if identified is NOT "Unknown"
+            # Log only known faces
             if identified != "Unknown":
                 if identified not in st.session_state.logs["Name"].values:
                     now = datetime.now().strftime("%H:%M:%S")
                     new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
                     st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
                     st.session_state.logs.to_csv(LOG_FILE, index=False)
-                    st.toast(f"Logged {identified}")
+                    st.toast(f"Marked attendance for {identified}")
 
 elif page == "Log":
     st.header("📊 Attendance Log")
