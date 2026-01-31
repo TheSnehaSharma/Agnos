@@ -23,12 +23,11 @@ if "logs" not in st.session_state:
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
 # --- FRONTEND CODE ---
-# Using unpkg and a storage-neutral initialization
+# Using ES Modules - This is the most robust way to load MediaPipe in 2026
 INTERFACE_CODE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <script src="https://unpkg.com/@mediapipe/tasks-vision@0.10.3/vision_bundle.js" crossorigin="anonymous"></script>
     <style>
         body { margin:0; background: #0e1117; color: #00FF00; font-family: monospace; }
         #view { position: relative; width: 100%; height: 400px; border-radius: 12px; overflow: hidden; background: #000; border: 1px solid #333; }
@@ -38,11 +37,15 @@ INTERFACE_CODE = """
 </head>
 <body>
     <div id="view">
-        <div id="status-bar">CONNECTING TO GOOGLE AI...</div>
+        <div id="status-bar">INITIALIZING ES MODULES...</div>
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="overlay"></canvas>
     </div>
-    <script>
+
+    <script type="module">
+        // Importing directly from the ESM-ready CDN
+        import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
         const video = document.getElementById("webcam");
         const canvas = document.getElementById("overlay");
         const ctx = canvas.getContext("2d");
@@ -50,23 +53,14 @@ INTERFACE_CODE = """
         let faceLandmarker;
 
         async function init() {
-            // Check if library loaded via global namespace
-            const visionLib = window.tasksVision;
-            
-            if (!visionLib) {
-                log.innerText = "ERROR: Browser blocked AI scripts. Disable 'Tracking Prevention' or Ad-Block.";
-                log.style.color = "#FF4B4B";
-                return;
-            }
-
             try {
-                log.innerText = "LOADING: Resolving WASM Modules...";
-                const vision = await visionLib.FilesetResolver.forVisionTasks(
-                    "https://unpkg.com/@mediapipe/tasks-vision@0.10.3/wasm"
+                log.innerText = "STATUS: Resolving MediaPipe WASM...";
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
                 );
                 
-                log.innerText = "LOADING: Fetching Official Face Model...";
-                faceLandmarker = await visionLib.FaceLandmarker.createFromOptions(vision, {
+                log.innerText = "STATUS: Loading Google Face Model...";
+                faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
                     baseOptions: {
                         modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
                         delegate: "GPU"
@@ -75,17 +69,18 @@ INTERFACE_CODE = """
                     numFaces: 1
                 });
 
-                log.innerText = "PERMISSION: Accessing Camera...";
+                log.innerText = "STATUS: Starting Camera...";
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
                 
                 video.onloadeddata = () => {
-                    log.innerText = "ONLINE: Privacy Mode Active (Local Encoding)";
+                    log.innerText = "SYSTEM ONLINE: Local Privacy Encoding";
                     predict();
                 };
             } catch (err) {
-                log.innerText = "CRITICAL: " + err.message;
+                log.innerText = "CRITICAL ERROR: " + err.message;
                 log.style.color = "#FF4B4B";
+                console.error(err);
             }
         }
 
@@ -93,21 +88,25 @@ INTERFACE_CODE = """
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             
-            const results = faceLandmarker.detectForVideo(video, performance.now());
+            const startTimeMs = performance.now();
+            const results = faceLandmarker.detectForVideo(video, startTimeMs);
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                 const landmarks = results.faceLandmarks[0];
+                
+                // Calculate Bounding Box
                 const xs = landmarks.map(p => p.x * canvas.width);
                 const ys = landmarks.map(p => p.y * canvas.height);
                 const minX = Math.min(...xs), maxX = Math.max(...xs);
                 const minY = Math.min(...ys), maxY = Math.max(...ys);
 
+                // Draw Rect
                 ctx.strokeStyle = "#00FF00";
                 ctx.lineWidth = 3;
                 ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
                 
-                // Privacy: Encode within browser, send only landmarks
+                // Send back to Python
                 window.parent.postMessage({
                     type: "streamlit:setComponentValue",
                     value: JSON.stringify(landmarks)
@@ -116,7 +115,7 @@ INTERFACE_CODE = """
             window.requestAnimationFrame(predict);
         }
 
-        window.onload = init;
+        init();
     </script>
 </body>
 </html>
@@ -132,17 +131,17 @@ if page == "Register":
     
     if val and isinstance(val, str):
         st.session_state.buffered_encoding = val
-        st.success(f"✅ Data Captured for {name}")
+        st.success(f"✅ Recognition Data Ready")
     
-    if st.button("Confirm Registration"):
+    if st.button("Save to Database"):
         if name and st.session_state.get('buffered_encoding'):
             st.session_state.db[name] = json.loads(st.session_state.buffered_encoding)
             with open(DB_FILE, "w") as f:
                 json.dump(st.session_state.db, f)
-            st.success(f"Successfully saved {name} to Database!")
+            st.success(f"Successfully saved {name}!")
             st.rerun()
         else:
-            st.error("Ensure name is entered and face is detected.")
+            st.error("Wait for detection and enter a name.")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Scanner")
@@ -154,7 +153,6 @@ elif page == "Live Feed":
             current_face = json.loads(feed_val)
             identified = "Unknown"
             
-            # Efficient comparison logic
             for db_name, saved_face in st.session_state.db.items():
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
