@@ -71,13 +71,10 @@ JS_CODE = """
                         drawRect(landmarks);
                         log.innerText = "✅ ENCODING SUCCESSFUL";
                         
-                        // BIDIRECTIONAL BRIDGE: Update parent URL with data
                         const dataString = btoa(JSON.stringify(landmarks));
                         const url = new URL(window.parent.location.href);
                         url.searchParams.set("face_data", dataString);
                         window.parent.history.replaceState({}, "", url);
-                        
-                        // Trigger a small scroll or click to nudge Streamlit to notice
                         window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'READY'}, "*");
                     } else {
                         log.innerText = "❌ ERROR: No face found.";
@@ -97,7 +94,6 @@ JS_CODE = """
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
             drawRect(landmarks);
-            // In live mode, we use the standard postMessage as it's faster
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
@@ -123,7 +119,6 @@ def get_component_html(img_b64=None):
     html_template += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
     html_template += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
     html_template += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
-    
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
     return html_template.replace("STATIC_IMG_PLACEHOLDER", img_val).replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO")
 
@@ -133,37 +128,47 @@ page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
     st.header("👤 Identity Registration")
-    name = st.text_input("Person Name").upper()
-    uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'])
     
-    # Check for the bridge data in URL
+    # Use a form key to clear input on save
+    name = st.text_input("Person Name", key="reg_name").upper()
+    uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'], key="uploader")
+    
+    # Catch bridge data
     url_data = st.query_params.get("face_data")
-    
+    if url_data:
+        try:
+            st.session_state.reg_data = base64.b64decode(url_data).decode()
+        except: pass
+
     if uploaded_file:
         b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
         st.components.v1.html(get_component_html(b64_img), height=420)
         
-    if url_data:
-        try:
-            # Decode the Base64 bridge data
-            decoded_json = base64.b64decode(url_data).decode()
-            st.session_state.reg_data = decoded_json
-            st.success(f"✅ Facial landmarks captured for {name}!")
-        except:
-            pass
-
     if "reg_data" in st.session_state and name:
+        st.success(f"✅ Facial landmarks captured for {name}!")
         if st.button("Confirm & Save to Database"):
             st.session_state.db[name] = json.loads(st.session_state.reg_data)
             with open(DB_FILE, "w") as f:
                 json.dump(st.session_state.db, f)
-            st.success(f"Registered {name} successfully!")
-            # Clean up URL and buffer
+            
+            # Reset everything
             st.query_params.clear()
-            del st.session_state.reg_data
+            if "reg_data" in st.session_state: del st.session_state.reg_data
+            st.success(f"Registered {name} successfully!")
             st.rerun()
     elif uploaded_file:
         st.info("⌛ Image detected. Once the green box appears, registration is ready.")
+
+    st.markdown("---")
+    st.subheader("📜 Last 10 Registered Users")
+    if st.session_state.db:
+        # Get last 10 items from dictionary
+        recent_names = list(st.session_state.db.keys())[-10:]
+        recent_names.reverse() # Show newest first
+        df_recent = pd.DataFrame(recent_names, columns=["Registered Name"])
+        st.table(df_recent)
+    else:
+        st.write("No users registered yet.")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Scanner")
