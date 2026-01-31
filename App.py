@@ -62,24 +62,25 @@ JS_CODE = """
             });
 
             if (staticImgSrc !== "null") {
-                log.innerText = "STATUS: Analyzing Photo...";
+                log.innerText = "STATUS: Extrapolating Landmarks...";
                 staticImg.src = staticImgSrc;
                 staticImg.onload = async () => {
                     const results = await faceLandmarker.detect(staticImg);
                     if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                         const landmarks = results.faceLandmarks[0];
                         drawRect(landmarks);
-                        log.innerText = "✅ ENCODING COMPLETE - PINGING BACKEND";
+                        log.innerText = "✅ ENCODING SUCCESSFUL";
                         
-                        // Repeatedly send the data to ensure Python catches it
-                        setInterval(() => {
-                            window.parent.postMessage({
-                                type: "streamlit:setComponentValue",
-                                value: JSON.stringify(landmarks)
-                            }, "*");
-                        }, 200);
+                        // BIDIRECTIONAL BRIDGE: Update parent URL with data
+                        const dataString = btoa(JSON.stringify(landmarks));
+                        const url = new URL(window.parent.location.href);
+                        url.searchParams.set("face_data", dataString);
+                        window.parent.history.replaceState({}, "", url);
+                        
+                        // Trigger a small scroll or click to nudge Streamlit to notice
+                        window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'READY'}, "*");
                     } else {
-                        log.innerText = "❌ NO FACE DETECTED IN IMAGE";
+                        log.innerText = "❌ ERROR: No face found.";
                     }
                 };
             } else {
@@ -96,6 +97,7 @@ JS_CODE = """
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
             drawRect(landmarks);
+            // In live mode, we use the standard postMessage as it's faster
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
@@ -125,40 +127,43 @@ def get_component_html(img_b64=None):
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
     return html_template.replace("STATIC_IMG_PLACEHOLDER", img_val).replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO")
 
-# --- UI LOGIC ---
+# --- UI NAVIGATION ---
 
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
-    st.header("👤 Registration")
+    st.header("👤 Identity Registration")
     name = st.text_input("Person Name").upper()
     uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'])
     
+    # Check for the bridge data in URL
+    url_data = st.query_params.get("face_data")
+    
     if uploaded_file:
         b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
+        st.components.v1.html(get_component_html(b64_img), height=420)
         
-        # We assign the component to a variable to catch the 'setInterval' pings
-        res = st.components.v1.html(get_component_html(b64_img), height=420)
-        
-        # Buffer the result into session state
-        if isinstance(res, str):
-            st.session_state.reg_data = res
+    if url_data:
+        try:
+            # Decode the Base64 bridge data
+            decoded_json = base64.b64decode(url_data).decode()
+            st.session_state.reg_data = decoded_json
+            st.success(f"✅ Facial landmarks captured for {name}!")
+        except:
+            pass
 
-    # Check if we have valid data in the session state buffer
     if "reg_data" in st.session_state and name:
-        st.success(f"✅ Data received from browser for {name}!")
         if st.button("Confirm & Save to Database"):
-            try:
-                st.session_state.db[name] = json.loads(st.session_state.reg_data)
-                with open(DB_FILE, "w") as f:
-                    json.dump(st.session_state.db, f)
-                st.success(f"Registered {name} successfully!")
-                del st.session_state.reg_data # Clear buffer
-                st.rerun()
-            except Exception as e:
-                st.error(f"Save failed: {e}")
+            st.session_state.db[name] = json.loads(st.session_state.reg_data)
+            with open(DB_FILE, "w") as f:
+                json.dump(st.session_state.db, f)
+            st.success(f"Registered {name} successfully!")
+            # Clean up URL and buffer
+            st.query_params.clear()
+            del st.session_state.reg_data
+            st.rerun()
     elif uploaded_file:
-        st.info("⌛ Image detected. Waiting for browser to finalize encoding...")
+        st.info("⌛ Image detected. Once the green box appears, registration is ready.")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Scanner")
@@ -166,7 +171,7 @@ elif page == "Live Feed":
     with col1:
         feed_val = st.components.v1.html(get_component_html(), height=420)
     with col2:
-        if isinstance(feed_val, str):
+        if isinstance(feed_val, str) and feed_val != "READY":
             current_face = json.loads(feed_val)
             identified = "Unknown"
             for db_name, saved_face in st.session_state.db.items():
