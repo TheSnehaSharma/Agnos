@@ -1,192 +1,158 @@
 import streamlit as st
 import pandas as pd
 import json
-import base64
-import os
 import numpy as np
+import os
 from datetime import datetime
 
-# --- 1. INITIALIZATION ---
-st.set_page_config(page_title="Google MediaPipe AI", layout="wide")
-DB_FILE = "registered_vectors.json"
+# --- SETTINGS & PERSISTENCE ---
+DB_FILE = "registered_faces.json"
+LOG_FILE = "attendance_log.csv"
 
-if 'registered_users' not in st.session_state:
+st.set_page_config(page_title="Privacy Face Auth", layout="wide")
+
+# Initialize Session State & Local Storage
+if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            st.session_state.registered_users = json.load(f)
-    else:
-        st.session_state.registered_users = []
+        with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
+    else: st.session_state.db = {}
 
-# --- 2. SERVER-SIDE COMPARISON ---
-def find_match_on_server(input_vector):
-    if not st.session_state.registered_users:
-        return "UNKNOWN"
-    
-    input_vec = np.array(input_vector)
-    best_match = "UNKNOWN"
-    min_dist = 0.45 # Threshold: 0.4 (Strict) to 0.6 (Loose)
-    
-    for user in st.session_state.registered_users:
-        known_vec = np.array(user['vector'])
-        # Cosine Distance logic
-        dot_product = np.dot(input_vec, known_vec)
-        norm_a = np.linalg.norm(input_vec)
-        norm_b = np.linalg.norm(known_vec)
-        dist = 1 - (dot_product / (norm_a * norm_b))
-        
-        if dist < min_dist:
-            min_dist = dist
-            best_match = base64.b64decode(user['name_encoded']).decode()
-            
-    return best_match
+if "logs" not in st.session_state:
+    if os.path.exists(LOG_FILE): st.session_state.logs = pd.read_csv(LOG_FILE)
+    else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
-# --- 3. REGISTRATION PAGE ---
-def registration_page():
-    st.title("👤 Secure Registration")
-    name = st.text_input("Full Name").strip().upper()
-    img_file = st.file_uploader("Upload Profile", type=['jpg', 'png', 'jpeg'])
-
-    if img_file and name:
-        img_b64 = base64.b64encode(img_file.read()).decode()
-        name_enc = base64.b64encode(name.encode()).decode()
-
-        # Fixed JS: Explicit model path and task assignment
-        js_mp_reg = f"""
-        <div id="status" style="color:#4285F4; font-family:sans-serif; font-weight:bold;">🧬 Initializing Google AI...</div>
-        <script type="module">
-            import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
-
-            async function run() {{
-                const status = document.getElementById("status");
-                try {{
-                    const fileset = await vision.FilesetResolver.forVisionTasks(
-                        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
-                    );
-                    const faceEmbedder = await vision.FaceEmbedder.createFromOptions(fileset, {{
-                        baseOptions: {{ 
-                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/latest/face_embedder.tflite",
-                            delegate: "GPU"
-                        }}
-                    }});
-
-                    const img = new Image();
-                    img.src = "data:image/jpeg;base64,{img_b64}";
-                    img.onload = async () => {{
-                        status.innerText = "🧬 Vectorizing Face...";
-                        const result = await faceEmbedder.embed(img);
-                        if (result.embeddings && result.embeddings.length > 0) {{
-                            window.parent.postMessage({{
-                                type: 'streamlit:setComponentValue',
-                                value: {{ vector: Array.from(result.embeddings[0].floatVector), name: "{name_enc}" }}
-                            }}, '*');
-                            status.innerText = "✅ Done!";
-                        }} else {{
-                            status.innerText = "❌ No face detected.";
-                        }}
-                    }};
-                }} catch (e) {{
-                    status.innerText = "❌ Error: " + e.message;
-                }}
-            }}
-            run();
-        </script>
-        """
-        data = st.components.v1.html(js_mp_reg, height=100)
-
-        if data and isinstance(data, dict):
-            new_user = {"name_encoded": data['name'], "vector": data['vector']}
-            st.session_state.registered_users.append(new_user)
-            with open(DB_FILE, "w") as f:
-                json.dump(st.session_state.registered_users, f)
-            st.success("Successfully registered!")
-            st.rerun()
-
-# --- 4. ATTENDANCE PAGE ---
-def attendance_page():
-    st.title("📹 Live Privacy Scanner")
-    
-    js_mp_attendance = """
-    <div style="position: relative;">
-        <video id="webcam" autoplay playsinline style="width: 100%; max-width: 640px; border-radius: 12px; transform: scaleX(-1);"></video>
-        <canvas id="output_canvas" style="position: absolute; top: 0; left: 0; transform: scaleX(-1);"></canvas>
+# --- FRONTEND COMPONENT (HTML & JS BUNDLE) ---
+# We use a raw string to ensure no external .html or .js files are needed
+INTERFACE_CODE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3"></script>
+    <style>
+        body { margin:0; background: #0e1117; color: white; font-family: sans-serif; }
+        #view { position: relative; width: 100%; height: 400px; border-radius: 12px; overflow: hidden; background: #000; }
+        video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+    </style>
+</head>
+<body>
+    <div id="view">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
     </div>
-    <p id="msg" style="color:#666; font-family:sans-serif;">Waiting for camera...</p>
+    <div id="status" style="padding: 10px; font-size: 12px; color: #00FF00;">Initializing Google AI...</div>
 
     <script type="module">
-        import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+        import { FaceLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
 
         const video = document.getElementById("webcam");
-        const canvas = document.getElementById("output_canvas");
-        const msg = document.getElementById("msg");
+        const canvas = document.getElementById("overlay");
+        const ctx = canvas.getContext("2d");
+        const status = document.getElementById("status");
+        let faceLandmarker;
 
-        async function init() {
+        async function setup() {
             try {
-                const fileset = await vision.FilesetResolver.forVisionTasks(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
-                );
-                
-                const detector = await vision.FaceDetector.createFromOptions(fileset, {
-                    baseOptions: { 
-                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/face_detector.tflite" 
+                const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+                faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                        delegate: "GPU"
                     },
-                    runningMode: "VIDEO"
+                    runningMode: "VIDEO",
+                    numFaces: 1
                 });
-
-                const embedder = await vision.FaceEmbedder.createFromOptions(fileset, {
-                    baseOptions: { 
-                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/latest/face_embedder.tflite" 
-                    }
-                });
-
+                
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
-
-                video.addEventListener("loadeddata", async () => {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    msg.innerText = "🔒 Official Google AI Active";
-                    
-                    const drawUtils = new vision.DrawingUtils(canvas.getContext("2d"));
-
-                    async function loop() {
-                        const detections = await detector.detectForVideo(video, performance.now());
-                        canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
-
-                        if (detections.detections && detections.detections.length > 0) {
-                            for (const det of detections.detections) {
-                                drawUtils.drawBoundingBox(det.boundingBox, { color: "#4285F4", lineWidth: 2 });
-                            }
-
-                            const result = await embedder.embed(video);
-                            if (result.embeddings && result.embeddings.length > 0) {
-                                window.parent.postMessage({
-                                    type: 'streamlit:setComponentValue',
-                                    value: Array.from(result.embeddings[0].floatVector)
-                                }, '*');
-                            }
-                        }
-                        requestAnimationFrame(loop);
-                    }
-                    loop();
-                });
-            } catch (e) { msg.innerText = "Error: " + e.message; }
+                video.addEventListener("loadeddata", predict);
+                status.innerText = "AI Active - Encoding locally";
+            } catch (e) {
+                status.innerText = "Error: " + e.message;
+                status.style.color = "#FF4B4B";
+            }
         }
-        init();
+
+        async function predict() {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const results = await faceLandmarker.detectForVideo(video, performance.now());
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (results.faceLandmarks.length > 0) {
+                const landmarks = results.faceLandmarks[0];
+                
+                // Draw mesh
+                const drawingUtils = new DrawingUtils(ctx);
+                drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_TESSELATION, {color: "#00FF0030", lineWidth: 1});
+                
+                // Send only mathematical coordinates to Python
+                window.parent.postMessage({
+                    type: "streamlit:setComponentValue",
+                    value: JSON.stringify(landmarks)
+                }, "*");
+            }
+            window.requestAnimationFrame(predict);
+        }
+        setup();
     </script>
-    """
+</body>
+</html>
+"""
+
+# --- PAGE NAVIGATION ---
+st.sidebar.title("Biometric Privacy v1")
+page = st.sidebar.radio("Go to", ["1. Register", "2. Live Recognition", "3. Log"])
+
+if page == "1. Register":
+    st.header("👤 Register New Identity")
+    name = st.text_input("Person Name (Uppercase)").upper()
+    st.info("The browser will encode your face landmarks. No photo is stored.")
     
-    live_vector = st.components.v1.html(js_mp_attendance, height=520)
+    # Render the JS component
+    raw_data = st.components.v1.html(INTERFACE_CODE, height=480)
+    
+    if raw_data and name:
+        if st.button(f"Save Face Print for {name}"):
+            st.session_state.db[name] = json.loads(raw_data)
+            with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
+            st.success(f"Registered {name}!")
+            st.rerun()
 
-    if live_vector:
-        name = find_match_on_server(live_vector)
-        if name == "UNKNOWN":
-            st.warning("⚠️ Unknown Person")
-        else:
-            st.success(f"✅ Recognized: {name}")
-            if st.button(f"Log Presence for {name}"):
-                st.toast(f"Logged {name}!")
+elif page == "2. Live Recognition":
+    st.header("📹 Secure Attendance Stream")
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        current_face_json = st.components.v1.html(INTERFACE_CODE, height=480)
+        
+    with col2:
+        if current_face_json:
+            current_face = json.loads(current_face_json)
+            identified = "Unknown"
+            
+            # Efficient Matching (Euclidean Distance on key landmarks)
+            for name, saved_face in st.session_state.db.items():
+                curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
+                save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
+                dist = np.mean(np.linalg.norm(curr_arr - save_arr, axis=1))
+                
+                if dist < 0.04: # Similarity threshold
+                    identified = name
+                    break
+            
+            st.metric("Detected Identity", identified)
+            
+            # Log attendance once per session
+            if identified != "Unknown" and identified not in st.session_state.logs["Name"].values:
+                now = datetime.now().strftime("%H:%M:%S")
+                new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
+                st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
+                st.session_state.logs.to_csv(LOG_FILE, index=False)
+                st.toast(f"Attendance recorded for {identified}")
 
-# --- NAV ---
-choice = st.sidebar.radio("Navigation", ["Take Attendance", "Register Face"])
-if choice == "Register Face": registration_page()
-else: attendance_page()
+elif page == "3. Log":
+    st.header("📊 Attendance Summary")
+    st.dataframe(st.session_state.logs, use_container_width=True)
+    
+    csv = st.session_state.logs.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download Records (.CSV)", data=csv, file_name="attendance.csv")
