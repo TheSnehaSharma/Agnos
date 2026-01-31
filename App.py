@@ -48,6 +48,16 @@ JS_CODE = """
     const runMode = "RUN_MODE_PLACEHOLDER";
     
     let faceLandmarker;
+    let currentIdentity = "Unknown";
+    let currentConfidence = 0;
+
+    // Listen for identity updates from Python
+    window.addEventListener("message", (event) => {
+        if (event.data.type === "identity_update") {
+            currentIdentity = event.data.name;
+            currentConfidence = event.data.confidence;
+        }
+    });
 
     async function init() {
         try {
@@ -62,22 +72,17 @@ JS_CODE = """
             });
 
             if (staticImgSrc !== "null") {
-                log.innerText = "STATUS: Extrapolating Landmarks...";
                 staticImg.src = staticImgSrc;
                 staticImg.onload = async () => {
                     const results = await faceLandmarker.detect(staticImg);
                     if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                         const landmarks = results.faceLandmarks[0];
-                        drawRect(landmarks);
-                        log.innerText = "✅ ENCODING SUCCESSFUL";
-                        
+                        drawOverlay(landmarks, "Target", 100);
                         const dataString = btoa(JSON.stringify(landmarks));
                         const url = new URL(window.parent.location.href);
                         url.searchParams.set("face_data", dataString);
                         window.parent.history.replaceState({}, "", url);
                         window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'READY'}, "*");
-                    } else {
-                        log.innerText = "❌ ERROR: No face found.";
                     }
                 };
             } else {
@@ -85,15 +90,18 @@ JS_CODE = """
                 video.srcObject = stream;
                 video.onloadeddata = () => { predictVideo(); };
             }
-        } catch (err) { log.innerText = "CRITICAL: " + err.message; }
+        } catch (err) { log.innerText = "ERROR: " + err.message; }
     }
 
     async function predictVideo() {
         const results = faceLandmarker.detectForVideo(video, performance.now());
         canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
-            drawRect(landmarks);
+            drawOverlay(landmarks, currentIdentity, currentConfidence);
+            
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
@@ -102,12 +110,26 @@ JS_CODE = """
         window.requestAnimationFrame(predictVideo);
     }
 
-    function drawRect(landmarks) {
+    function drawOverlay(landmarks, name, conf) {
         const xs = landmarks.map(p => p.x * canvas.width);
         const ys = landmarks.map(p => p.y * canvas.height);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.strokeStyle = "#00FF00"; ctx.lineWidth = 5;
-        ctx.strokeRect(Math.min(...xs), Math.min(...ys), Math.max(...xs)-Math.min(...xs), Math.max(...ys)-Math.min(...ys));
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
+
+        const color = name === "Unknown" ? "#FF4B4B" : "#00FF00";
+        
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+        // Label Background
+        ctx.fillStyle = color;
+        ctx.fillRect(minX, minY - 30, maxX - minX, 30);
+
+        // Label Text
+        ctx.fillStyle = "white";
+        ctx.font = "bold 16px monospace";
+        ctx.fillText(`${name} (${conf}%)`, minX + 5, minY - 10);
     }
     init();
 </script>
@@ -115,7 +137,7 @@ JS_CODE = """
 
 def get_component_html(img_b64=None):
     html_template = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
-    html_template += f'<div id="view"><div id="status-bar">...</div>'
+    html_template += f'<div id="view"><div id="status-bar">LIVE SYSTEM</div>'
     html_template += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
     html_template += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
     html_template += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
@@ -128,16 +150,12 @@ page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
     st.header("👤 Identity Registration")
-    
-    # Use a form key to clear input on save
     name = st.text_input("Person Name", key="reg_name").upper()
     uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'], key="uploader")
     
-    # Catch bridge data
     url_data = st.query_params.get("face_data")
     if url_data:
-        try:
-            st.session_state.reg_data = base64.b64decode(url_data).decode()
+        try: st.session_state.reg_data = base64.b64decode(url_data).decode()
         except: pass
 
     if uploaded_file:
@@ -148,53 +166,52 @@ if page == "Register":
         st.success(f"✅ Facial landmarks captured for {name}!")
         if st.button("Confirm & Save to Database"):
             st.session_state.db[name] = json.loads(st.session_state.reg_data)
-            with open(DB_FILE, "w") as f:
-                json.dump(st.session_state.db, f)
-            
-            # Reset everything
+            with open(DB_FILE, "w") as f: json.dump(st.session_state.db, f)
             st.query_params.clear()
             if "reg_data" in st.session_state: del st.session_state.reg_data
             st.success(f"Registered {name} successfully!")
             st.rerun()
-    elif uploaded_file:
-        st.info("⌛ Image detected. Once the green box appears, registration is ready.")
 
     st.markdown("---")
-    st.subheader("📜 Last 10 Registered Users")
+    st.subheader("📜 Recent Registrations")
     if st.session_state.db:
-        # Get last 10 items from dictionary
-        recent_names = list(st.session_state.db.keys())[-10:]
-        recent_names.reverse() # Show newest first
-        df_recent = pd.DataFrame(recent_names, columns=["Registered Name"])
-        st.table(df_recent)
-    else:
-        st.write("No users registered yet.")
+        st.table(pd.DataFrame(list(st.session_state.db.keys())[::-1][:10], columns=["Name"]))
 
 elif page == "Live Feed":
-    st.header("📹 Attendance Scanner")
+    st.header("📹 Live Attendance Terminal")
     col1, col2 = st.columns([3, 1])
+    
     with col1:
+        # Standard Streamlit Component
         feed_val = st.components.v1.html(get_component_html(), height=420)
+    
     with col2:
         if isinstance(feed_val, str) and feed_val != "READY":
             current_face = json.loads(feed_val)
             identified = "Unknown"
+            highest_conf = 0
+            
+            # Match Logic
             for db_name, saved_face in st.session_state.db.items():
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
                 dist = np.mean(np.linalg.norm(curr_arr - save_arr, axis=1))
-                if dist < 0.05:
+                
+                # Confidence Calculation: 0.05 dist = 0%, 0.0 dist = 100%
+                conf = max(0, int((1 - (dist / 0.05)) * 100))
+                
+                if dist < 0.05 and conf > highest_conf:
                     identified = db_name
-                    break
-            st.subheader(f"Status: {identified}")
-            if identified != "Unknown" and identified not in st.session_state.logs["Name"].values:
-                now = datetime.now().strftime("%H:%M:%S")
-                new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
-                st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
-                st.session_state.logs.to_csv(LOG_FILE, index=False)
-                st.toast(f"Logged {identified}")
+                    highest_conf = conf
 
-elif page == "Log":
-    st.header("📊 History")
-    st.dataframe(st.session_state.logs, use_container_width=True)
-    st.download_button("Export CSV", st.session_state.logs.to_csv(index=False), "attendance.csv")
+            st.metric("Detected", identified, f"{highest_conf}% Match" if highest_conf > 0 else None)
+
+            # --- LOGGING FIX ---
+            if identified != "Unknown":
+                # Create a simple unique key for the user today
+                today = datetime.now().strftime("%Y-%m-%d")
+                log_check = f"{identified}_{today}"
+                
+                if "last_logged" not in st.session_state or st.session_state.last_logged != log_check:
+                    now_time = datetime.now().strftime("%H:%M:%S")
+                    new_entry = pd.DataFrame({"
