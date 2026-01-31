@@ -1,5 +1,6 @@
 streamlit
 streamlit-javascript
+streamlit-js-eval
 pako
 opencv-python-headless
 numpy
