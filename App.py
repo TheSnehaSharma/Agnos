@@ -2,76 +2,81 @@ import streamlit as st
 import cv2
 import numpy as np
 import base64
-import os
 from insightface.app import FaceAnalysis
 
-st.set_page_config(page_title="Agnos Pipe Fix", layout="wide")
+st.set_page_config(page_title="Pipe Repair", layout="wide")
 
-# --- AI ENGINE ---
 @st.cache_resource
-def load_insightface():
-    try:
-        # Using the smallest model for the fastest handshake
-        app = FaceAnalysis(name='buffalo_s', providers=['CPUExecutionProvider'])
-        app.prepare(ctx_id=0, det_size=(320, 320))
-        return app
-    except Exception as e:
-        return None
+def load_ai():
+    app = FaceAnalysis(name='buffalo_s', providers=['CPUExecutionProvider'])
+    app.prepare(ctx_id=0, det_size=(320, 320))
+    return app
 
-# --- UPDATED JS BRIDGE (The Fix) ---
-JS_FIXED_CODE = """
-<div id="video-container" style="background:#000; border-radius:10px; overflow:hidden;">
-    <video id="v" autoplay playsinline style="width:100%; height:auto;"></video>
+# --- THE "WAIT-FOR-PIXELS" JS ---
+JS_FINAL_FIX = """
+<div style="background:#000; border-radius:10px; padding:10px; text-align:center;">
+    <video id="v" autoplay playsinline style="width:240px; border:2px solid #333;"></video>
     <canvas id="c" style="display:none;"></canvas>
+    <div id="stat" style="color:#0F0; font-family:monospace; margin-top:5px;">CAMERA: WAITING...</div>
 </div>
+
 <script>
     const v = document.getElementById('v');
     const c = document.getElementById('c');
     const ctx = c.getContext('2d');
+    const stat = document.getElementById('stat');
     
-    // Request camera
     navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
-        .then(stream => { v.srcObject = stream; })
-        .catch(err => console.error("Camera Error:", err));
+        .then(stream => { 
+            v.srcObject = stream;
+            stat.innerText = "CAMERA: CONNECTED";
+        })
+        .catch(err => { stat.innerText = "ERROR: " + err.name; });
 
-    function capture() {
-        // ONLY send if the video is actually playing and providing data
-        if (v.readyState === 4) { 
-            c.width = 320; c.height = 240;
-            ctx.drawImage(v, 0, 0, 320, 240);
-            
-            const data = c.toDataURL('image/jpeg', 0.6);
-            
-            // Check if string is healthy (Longer than 1000 chars)
-            if (data.length > 1000) {
-                window.parent.postMessage({
-                    type: "streamlit:setComponentValue",
-                    value: data
-                }, "*");
-            }
+    function process() {
+        // 1. Check if video is actually playing and has dimensions
+        if (v.paused || v.ended || v.videoWidth === 0) return;
+
+        c.width = 320;
+        c.height = 240;
+        ctx.drawImage(v, 0, 0, 320, 240);
+        
+        // 2. Extract frame
+        const data = c.toDataURL('image/jpeg', 0.5);
+        
+        // 3. ONLY send if it's a real image (Real JPEGs are > 3000 chars)
+        if (data.length > 2000) {
+            stat.innerText = "STREAMING: " + data.length + " chars";
+            window.parent.postMessage({
+                type: "streamlit:setComponentValue",
+                value: data
+            }, "*");
+        } else {
+            stat.innerText = "STREAMING: DATA TOO SMALL";
         }
     }
-    // Faster interval for debugging (1 second)
-    setInterval(capture, 1000);
+
+    // Try to capture every 1.5 seconds
+    setInterval(process, 1500);
 </script>
 """
 
-st.title("🛰️ Pipe Repair Console")
+st.title("🛰️ Pipe Repair Console v2")
 col_cam, col_debug = st.columns([1, 1])
 
 with col_cam:
-    st.subheader("1. Video Source")
-    img_data = st.components.v1.html(JS_FIXED_CODE, height=250)
-    if not img_data:
-        st.info("Waiting for first valid frame from camera...")
+    st.subheader("1. Browser Component")
+    img_data = st.components.v1.html(JS_FINAL_FIX, height=300)
 
 with col_debug:
     st.subheader("2. Python Debug")
     
     if img_data:
         try:
-            # 1. Clean and Decode
             raw_str = str(img_data)
+            # LOG THE RAW START TO SEE WHAT IT IS
+            st.code(raw_str[:50] + "...", language="text")
+            
             if "," in raw_str:
                 encoded = raw_str.split(",")[1]
                 # Fix padding
@@ -81,27 +86,17 @@ with col_debug:
                 st.write(f"📊 String Length: {len(raw_str)}")
                 st.write(f"✅ Bytes Decoded: {len(img_bytes)}")
                 
-                # 2. Convert to CV2
                 nparr = np.frombuffer(img_bytes, np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
                 if frame is not None:
-                    st.image(frame, width=200, caption="Python Received Frame")
-                    
-                    # 3. AI Inference (ONLY if frame is valid)
-                    engine = load_insightface()
-                    if engine:
-                        faces = engine.get(frame)
-                        st.write(f"🎯 AI Status: Detected {len(faces)} faces")
-                        if len(faces) > 0:
-                            st.success("WE ARE LIVE! Bridge is fully functional.")
+                    st.image(frame, width=250, caption="SUCCESS: Frame received")
+                    engine = load_ai()
+                    faces = engine.get(frame)
+                    st.success(f"🎯 AI DETECTED {len(faces)} FACES")
                 else:
-                    st.error("❌ OpenCV failed to read bytes. Bytes might be corrupted.")
-            else:
-                st.error("❌ Received malformed string (No Base64 header).")
+                    st.error("❌ OpenCV could not reconstruct the image.")
         except Exception as e:
-            st.error(f"💥 Error: {e}")
-
-if st.button("Clear Cache & Rerun"):
-    st.cache_resource.clear()
-    st.rerun()
+            st.error(f"💥 Python Error: {e}")
+    else:
+        st.info("Awaiting JS Handshake...")
