@@ -99,12 +99,86 @@ def registration_page():
 
 # --- 3. ATTENDANCE PAGE (LIVE SCANNER) ---
 def attendance_page():
-    st.title("📹 Live Presence Scanner")
+    st.title("📹 Hybrid AI Scanner")
     
+    # Check if users exist to avoid errors
     if not st.session_state.registered_users:
-        st.warning("⚠️ No users registered. Showing feed in 'Detection Only' mode.")
-    
-    known_json = json.dumps(st.session_state.registered_users)
+        st.warning("Please register a user first.")
+        return
 
-    js_attendance = f"""
-    <div style="position: relative; display: inline-block; width: 100
+    # 1. Server-side Matching Logic
+    def find_match(input_embedding):
+        import numpy as np
+        input_vec = np.array(input_embedding)
+        best_match = "Unknown"
+        min_dist = 0.5 
+
+        for user in st.session_state.registered_users:
+            dist = np.linalg.norm(input_vec - np.array(user['encoding']))
+            if dist < min_dist:
+                min_dist = dist
+                best_match = user['name']
+        return best_match
+
+    # 2. JavaScript Interface (Escaped Braces for f-string)
+    js_interface = f"""
+    <div style="position: relative; width: 640px; border-radius: 15px; overflow: hidden;">
+        <video id="video" width="640" height="480" autoplay muted style="transform: scaleX(-1);"></video>
+        <canvas id="overlay" style="position: absolute; top: 0; left: 0; transform: scaleX(-1);"></canvas>
+    </div>
+
+    <script type="module">
+        import * as faceapi from 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.esm.js';
+
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('overlay');
+        const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
+
+        async function setup() {{
+            try {{
+                await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+
+                const stream = await navigator.mediaDevices.getUserMedia({{ video: true }});
+                video.srcObject = stream;
+
+                video.onplay = () => {{
+                    const displaySize = {{ width: video.width, height: video.height }};
+                    faceapi.matchDimensions(canvas, displaySize);
+
+                    setInterval(async () => {{
+                        const detections = await faceapi.detectAllFaces(video).withFaceLandmarks().withFaceDescriptors();
+                        const resized = faceapi.resizeResults(detections, displaySize);
+                        
+                        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+                        
+                        if (detections.length > 0) {{
+                            // Only send the vector (descriptor) to the server
+                            window.parent.postMessage({{
+                                type: 'streamlit:setComponentValue',
+                                value: Array.from(detections[0].descriptor)
+                            }}, '*');
+                            
+                            faceapi.draw.drawDetections(canvas, resized);
+                        }}
+                    }}, 1000); 
+                }};
+            }} catch (e) {{
+                console.error("Camera error:", e);
+            }}
+        }}
+        setup();
+    </script>
+    """
+
+    # 3. Component Bridge
+    client_vector = st.components.v1.html(js_interface, height=500)
+
+    # 4. Result Handling
+    if client_vector and isinstance(client_vector, list):
+        name = find_match(client_vector)
+        st.subheader(f"Detected: {name}")
+        if name != "Unknown":
+            if st.button("Log Attendance"):
+                st.success(f"Log saved for {name}")
