@@ -24,12 +24,16 @@ def find_match_on_server(input_vector):
     
     input_vec = np.array(input_vector)
     best_match = "UNKNOWN"
-    min_dist = 0.4 # Threshold: Smaller is stricter
+    min_dist = 0.45 # Threshold: 0.4 (Strict) to 0.6 (Loose)
     
     for user in st.session_state.registered_users:
         known_vec = np.array(user['vector'])
-        # Cosine Distance
-        dist = 1 - (np.dot(input_vec, known_vec) / (np.linalg.norm(input_vec) * np.linalg.norm(known_vec)))
+        # Cosine Distance logic
+        dot_product = np.dot(input_vec, known_vec)
+        norm_a = np.linalg.norm(input_vec)
+        norm_b = np.linalg.norm(known_vec)
+        dist = 1 - (dot_product / (norm_a * norm_b))
+        
         if dist < min_dist:
             min_dist = dist
             best_match = base64.b64decode(user['name_encoded']).decode()
@@ -46,20 +50,21 @@ def registration_page():
         img_b64 = base64.b64encode(img_file.read()).decode()
         name_enc = base64.b64encode(name.encode()).decode()
 
-        # FIXED JS: Uses the full vision bundle to ensure FaceEmbedder is found
+        # Fixed JS: Explicit model path and task assignment
         js_mp_reg = f"""
         <div id="status" style="color:#4285F4; font-family:sans-serif; font-weight:bold;">🧬 Initializing Google AI...</div>
         <script type="module">
             import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
-            const {{ FaceEmbedder, FilesetResolver }} = vision;
 
             async function run() {{
                 const status = document.getElementById("status");
                 try {{
-                    const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-                    const faceEmbedder = await FaceEmbedder.createFromOptions(fileset, {{
+                    const fileset = await vision.FilesetResolver.forVisionTasks(
+                        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                    );
+                    const faceEmbedder = await vision.FaceEmbedder.createFromOptions(fileset, {{
                         baseOptions: {{ 
-                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/1/face_embedder.tflite",
+                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/latest/face_embedder.tflite",
                             delegate: "GPU"
                         }}
                     }});
@@ -69,14 +74,14 @@ def registration_page():
                     img.onload = async () => {{
                         status.innerText = "🧬 Vectorizing Face...";
                         const result = await faceEmbedder.embed(img);
-                        if (result.embeddings.length > 0) {{
+                        if (result.embeddings && result.embeddings.length > 0) {{
                             window.parent.postMessage({{
                                 type: 'streamlit:setComponentValue',
                                 value: {{ vector: Array.from(result.embeddings[0].floatVector), name: "{name_enc}" }}
                             }}, '*');
-                            status.innerText = "✅ Done! Vector sent to server.";
+                            status.innerText = "✅ Done!";
                         }} else {{
-                            status.innerText = "❌ No face detected in photo.";
+                            status.innerText = "❌ No face detected.";
                         }}
                     }};
                 }} catch (e) {{
@@ -109,7 +114,6 @@ def attendance_page():
 
     <script type="module">
         import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
-        const { FaceDetector, FaceEmbedder, FilesetResolver, DrawingUtils } = vision;
 
         const video = document.getElementById("webcam");
         const canvas = document.getElementById("output_canvas");
@@ -117,15 +121,21 @@ def attendance_page():
 
         async function init() {
             try {
-                const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+                const fileset = await vision.FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                );
                 
-                const detector = await FaceDetector.createFromOptions(fileset, {
-                    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/face_detector.tflite" },
+                const detector = await vision.FaceDetector.createFromOptions(fileset, {
+                    baseOptions: { 
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/face_detector.tflite" 
+                    },
                     runningMode: "VIDEO"
                 });
 
-                const embedder = await FaceEmbedder.createFromOptions(fileset, {
-                    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/1/face_embedder.tflite" }
+                const embedder = await vision.FaceEmbedder.createFromOptions(fileset, {
+                    baseOptions: { 
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/latest/face_embedder.tflite" 
+                    }
                 });
 
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -136,19 +146,19 @@ def attendance_page():
                     canvas.height = video.videoHeight;
                     msg.innerText = "🔒 Official Google AI Active";
                     
-                    const drawUtils = new DrawingUtils(canvas.getContext("2d"));
+                    const drawUtils = new vision.DrawingUtils(canvas.getContext("2d"));
 
                     async function loop() {
                         const detections = await detector.detectForVideo(video, performance.now());
                         canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
 
-                        if (detections.detections.length > 0) {
+                        if (detections.detections && detections.detections.length > 0) {
                             for (const det of detections.detections) {
                                 drawUtils.drawBoundingBox(det.boundingBox, { color: "#4285F4", lineWidth: 2 });
                             }
 
                             const result = await embedder.embed(video);
-                            if (result.embeddings.length > 0) {
+                            if (result.embeddings && result.embeddings.length > 0) {
                                 window.parent.postMessage({
                                     type: 'streamlit:setComponentValue',
                                     value: Array.from(result.embeddings[0].floatVector)
@@ -173,8 +183,8 @@ def attendance_page():
             st.warning("⚠️ Unknown Person")
         else:
             st.success(f"✅ Recognized: {name}")
-            if st.button(f"Log {name}"):
-                st.toast("Attendance Logged")
+            if st.button(f"Log Presence for {name}"):
+                st.toast(f"Logged {name}!")
 
 # --- NAV ---
 choice = st.sidebar.radio("Navigation", ["Take Attendance", "Register Face"])
