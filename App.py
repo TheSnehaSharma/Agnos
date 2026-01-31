@@ -74,9 +74,9 @@ def registration_page():
                 if result == "ERR_NONE":
                     st.error("❌ No face detected. Please use a clearer photo.")
                 elif result == "ERR_MULTI":
-                    st.error("❌ Multiple people detected. Please upload a photo with only one person.")
+                    st.error("❌ Multiple people detected. Please upload a solo photo.")
                 elif result == "ERR_LOAD":
-                    st.error("❌ AI Models failed to load.")
+                    st.error("❌ AI Models failed to load. Check internet connection.")
                 elif isinstance(result, list):
                     if not any(u['name'] == name for u in st.session_state.registered_users):
                         st.session_state.registered_users.append({"name": name, "encoding": result})
@@ -126,11 +126,11 @@ def attendance_page():
                 video.srcObject = stream;
 
                 video.addEventListener('play', () => {{
-                    const displaySize = {{ width: video.videoWidth || 500, height: video.videoHeight || 375 }};
+                    const displaySize = {{ width: video.videoWidth, height: video.videoHeight }};
                     canvas.width = displaySize.width;
                     canvas.height = displaySize.height;
                     faceapi.matchDimensions(canvas, displaySize);
-                    label.innerText = "AI Scanning Active";
+                    label.innerText = "AI Active: Scanning...";
 
                     setInterval(async () => {{
                         const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptors();
@@ -150,7 +150,7 @@ def attendance_page():
                                 chime.play();
                             }}
                         }}
-                    }}, 1000);
+                    }}, 1200);
                 }});
             }} catch (e) {{ label.innerText = "Error: " + e.message; }}
         }}
@@ -169,4 +169,36 @@ def attendance_page():
                 "Time": ts.strftime("%H:%M:%S"), 
                 "Status": "Present"
             }
-            st.
+            st.session_state.attendance_records.append(entry)
+            st.session_state.already_logged.add(match_name)
+            pd.DataFrame([entry]).to_csv(LOG_FILE, mode='a', header=False, index=False)
+            st.success(f"Attendance Recorded: {match_name}")
+            st.balloons()
+
+# --- PAGE 3: LOGS ---
+def logs_page():
+    st.title("📄 Attendance Logs")
+    present_names = [r["Name"] for r in st.session_state.attendance_records]
+    all_rows = list(st.session_state.attendance_records)
+    
+    for user in st.session_state.registered_users:
+        if user['name'] not in present_names:
+            all_rows.append({
+                "Name": user['name'], 
+                "Date": datetime.now().strftime("%Y-%m-%d"), 
+                "Time": "-", 
+                "Status": "Absent"
+            })
+    
+    df = pd.DataFrame(all_rows)
+    st.dataframe(df, use_container_width=True)
+    st.download_button("📥 Download Report", df.to_csv(index=False).encode('utf-8'), "attendance.csv", "text/csv")
+
+# --- NAVIGATION ---
+page = st.sidebar.radio("Navigation", ["Register", "Attendance", "View Logs"])
+if page == "Register":
+    registration_page()
+elif page == "Attendance":
+    attendance_page()
+else:
+    logs_page()
