@@ -6,6 +6,5 @@ opencv-python-headless
 numpy
 pandas
 av
-deepface
-tf-keras
-face-recognition
+insightface
+onnxruntime
