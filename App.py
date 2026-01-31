@@ -110,7 +110,7 @@ if page == "Register":
             st.rerun()
 
 elif page == "Live Feed":
-    st.header("📹 Biometric Scanner")
+    st.header("📹 Turbo Biometric Scanner")
     col_v, col_s = st.columns([2, 1])
     
     with col_v:
@@ -119,27 +119,33 @@ elif page == "Live Feed":
     with col_s:
         if img_data:
             try:
-                # REPAIR PADDING
+                # 1. Repair and Decode
                 b64_str = str(img_data).split(',')[1]
                 missing_padding = len(b64_str) % 4
-                if missing_padding:
-                    b64_str += '=' * (4 - missing_padding)
+                if missing_padding: b64_str += '=' * (4 - missing_padding)
                 
-                # Decode
                 nparr = np.frombuffer(base64.b64decode(b64_str), np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
-                # Search
-                res = DeepFace.find(img_path=frame, db_path=DB_FOLDER, 
-                                   model_name=MODEL_NAME, enforce_detection=False, 
-                                   detector_backend="opencv", silent=True)
+                # 2. MATCHING (The Turbo Part)
+                # detector_backend="skip" tells DeepFace NOT to look for a face.
+                # It treats the whole 240x180 image as the face.
+                res = DeepFace.find(
+                    img_path=frame, 
+                    db_path=DB_FOLDER, 
+                    model_name=MODEL_NAME, 
+                    enforce_detection=False, 
+                    detector_backend="skip", 
+                    silent=True
+                )
                 
                 if len(res) > 0 and not res[0].empty:
                     match_name = os.path.basename(res[0].iloc[0]['identity']).split('.')[0]
                     dist = res[0].iloc[0]['distance']
+                    # Facenet512 threshold
                     acc = max(0, int((1 - dist/0.38) * 100))
                     
-                    if acc > 30:
+                    if acc > 25:
                         st.metric("Detected", match_name, f"{acc}% Match")
                         if match_name not in st.session_state.logged_set:
                             save_attendance_pkl(match_name)
@@ -148,9 +154,10 @@ elif page == "Live Feed":
                     else:
                         st.warning("Identity: Unknown")
                 else:
-                    st.warning("Searching for match...")
+                    st.info("Searching database...")
             except Exception as e:
-                st.error("Processing sync...")
+                # This will help us see if it's a model error or a data error
+                st.error(f"Sync Error: {str(e)}")
         else:
             st.info("Awaiting Handshake...")
 
