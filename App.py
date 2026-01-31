@@ -62,24 +62,24 @@ JS_CODE = """
             });
 
             if (staticImgSrc !== "null") {
-                log.innerText = "STATUS: Extrapolating Landmarks...";
+                log.innerText = "STATUS: Analyzing Photo...";
                 staticImg.src = staticImgSrc;
                 staticImg.onload = async () => {
                     const results = await faceLandmarker.detect(staticImg);
                     if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                         const landmarks = results.faceLandmarks[0];
                         drawRect(landmarks);
-                        log.innerText = "✅ DATA READY - PINGING PYTHON...";
+                        log.innerText = "✅ ENCODING COMPLETE - PINGING BACKEND";
                         
-                        // REPEAT PING: Keep sending until the user clicks save
+                        // Repeatedly send the data to ensure Python catches it
                         setInterval(() => {
                             window.parent.postMessage({
                                 type: "streamlit:setComponentValue",
                                 value: JSON.stringify(landmarks)
                             }, "*");
-                        }, 500); 
+                        }, 200);
                     } else {
-                        log.innerText = "❌ NO FACE IN PHOTO";
+                        log.innerText = "❌ NO FACE DETECTED IN IMAGE";
                     }
                 };
             } else {
@@ -125,35 +125,40 @@ def get_component_html(img_b64=None):
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
     return html_template.replace("STATIC_IMG_PLACEHOLDER", img_val).replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO")
 
-# --- UI NAVIGATION ---
+# --- UI LOGIC ---
 
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
-    st.header("👤 Identity Registration")
-    name = st.text_input("Name").upper()
-    uploaded_file = st.file_uploader("Upload Profile Photo", type=['jpg', 'jpeg', 'png'])
+    st.header("👤 Registration")
+    name = st.text_input("Person Name").upper()
+    uploaded_file = st.file_uploader("Upload Profile Image", type=['jpg', 'jpeg', 'png'])
     
     if uploaded_file:
         b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
-        # Captured from the iframe via setInterval loop in JS
-        captured_data = st.components.v1.html(get_component_html(b64_img), height=420)
         
-        if isinstance(captured_data, str):
-            st.session_state.buffered_reg = captured_data
+        # We assign the component to a variable to catch the 'setInterval' pings
+        res = st.components.v1.html(get_component_html(b64_img), height=420)
+        
+        # Buffer the result into session state
+        if isinstance(res, str):
+            st.session_state.reg_data = res
 
-    # Save logic
-    if "buffered_reg" in st.session_state and name:
-        st.success(f"Encoding locked for {name}. Confirm below.")
+    # Check if we have valid data in the session state buffer
+    if "reg_data" in st.session_state and name:
+        st.success(f"✅ Data received from browser for {name}!")
         if st.button("Confirm & Save to Database"):
-            st.session_state.db[name] = json.loads(st.session_state.buffered_reg)
-            with open(DB_FILE, "w") as f:
-                json.dump(st.session_state.db, f)
-            st.success(f"Successfully saved {name}!")
-            del st.session_state.buffered_reg
-            st.rerun()
+            try:
+                st.session_state.db[name] = json.loads(st.session_state.reg_data)
+                with open(DB_FILE, "w") as f:
+                    json.dump(st.session_state.db, f)
+                st.success(f"Registered {name} successfully!")
+                del st.session_state.reg_data # Clear buffer
+                st.rerun()
+            except Exception as e:
+                st.error(f"Save failed: {e}")
     elif uploaded_file:
-        st.info("🔄 Processing image... Please look for the green success box.")
+        st.info("⌛ Image detected. Waiting for browser to finalize encoding...")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Scanner")
