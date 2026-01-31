@@ -32,7 +32,11 @@ load_ai_models()
 if "logged_set" not in st.session_state:
     st.session_state.logged_set = set()
 
-# --- HELPER: LOGGING ---
+# --- HELPER: LOGGING & PADDING ---
+def repair_padding(b64_string):
+    """Adds missing = padding to a Base64 string."""
+    return b64_string + "=" * ((4 - len(b64_string) % 4) % 4)
+
 def save_attendance_pkl(name):
     logs = []
     if os.path.exists(PKL_LOG):
@@ -44,7 +48,7 @@ def save_attendance_pkl(name):
     with open(PKL_LOG, "wb") as f:
         pickle.dump(logs, f)
 
-# --- JAVASCRIPT CAMERA (GRAYSCALE & COMPRESSED) ---
+# --- JAVASCRIPT CAMERA (ULTRA COMPACT) ---
 JS_CODE = """
 <div style="background:#000; border-radius:12px; overflow:hidden; width:100%; height:250px;">
     <video id="v" autoplay playsinline style="width:100%; height:100%; object-fit:contain;"></video>
@@ -56,36 +60,36 @@ JS_CODE = """
     const ctx = c.getContext('2d');
 
     async function start() {
-        const s = await navigator.mediaDevices.getUserMedia({ video: { width: 240, height: 180 } });
+        const s = await navigator.mediaDevices.getUserMedia({ video: { width: 160, height: 120 } });
         v.srcObject = s;
     }
 
     function sync() {
         if (v.readyState === v.HAVE_ENOUGH_DATA) {
-            c.width = 240; c.height = 180;
-            ctx.drawImage(v, 0, 0, 240, 180);
+            c.width = 160; c.height = 120;
+            ctx.drawImage(v, 0, 0, 160, 120);
             
-            // --- GRAYSCALE CONVERSION (Reduces data significantly) ---
+            // Aggressive Grayscale
             let imgData = ctx.getImageData(0, 0, c.width, c.height);
-            let data = imgData.data;
-            for (let i = 0; i < data.length; i += 4) {
-                let avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-                data[i] = avg; data[i + 1] = avg; data[i + 2] = avg;
+            let d = imgData.data;
+            for (let i = 0; i < d.length; i += 4) {
+                let avg = (d[i] + d[i+1] + d[i+2]) / 3;
+                d[i] = avg; d[i+1] = avg; d[i+2] = avg;
             }
             ctx.putImageData(imgData, 0, 0);
 
-            // WebP is the most efficient string-based format
-            const dataURL = c.toDataURL('image/webp', 0.2); 
+            // Tiny WebP packet
+            const dataURL = c.toDataURL('image/webp', 0.1); 
             window.parent.postMessage({type: "streamlit:setComponentValue", value: dataURL}, "*");
         }
     }
 
     start();
-    setInterval(sync, 3000); 
+    setInterval(sync, 2500); 
 </script>
 """
 
-# --- UI ---
+# --- UI NAVIGATION ---
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log History"])
 
 if page == "Register":
@@ -99,16 +103,6 @@ if page == "Register":
             os.remove(os.path.join(DB_FOLDER, p))
         st.success(f"Registered {name}")
 
-    st.markdown("---")
-    st.subheader("🗂️ Manage Database")
-    all_users = [f for f in os.listdir(DB_FOLDER) if f.endswith(('.jpg', '.png'))]
-    for f in all_users:
-        col_n, col_b = st.columns([4, 1])
-        col_n.write(f"✅ {f.split('.')[0]}")
-        if col_b.button("Delete", key=f"del_{f}"):
-            os.remove(os.path.join(DB_FOLDER, f))
-            st.rerun()
-
 elif page == "Live Feed":
     st.header("📹 Turbo Biometric Scanner")
     col_v, col_s = st.columns([2, 1])
@@ -119,17 +113,15 @@ elif page == "Live Feed":
     with col_s:
         if img_data:
             try:
-                # 1. Repair and Decode
-                b64_str = str(img_data).split(',')[1]
-                missing_padding = len(b64_str) % 4
-                if missing_padding: b64_str += '=' * (4 - missing_padding)
+                # 1. Extract and Repair String
+                raw_b64 = str(img_data).split(',')[1]
+                clean_b64 = repair_padding(raw_b64)
                 
-                nparr = np.frombuffer(base64.b64decode(b64_str), np.uint8)
+                # 2. Decode
+                nparr = np.frombuffer(base64.b64decode(clean_b64), np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
-                # 2. MATCHING (The Turbo Part)
-                # detector_backend="skip" tells DeepFace NOT to look for a face.
-                # It treats the whole 240x180 image as the face.
+                # 3. Match (Skip detector for speed)
                 res = DeepFace.find(
                     img_path=frame, 
                     db_path=DB_FOLDER, 
@@ -142,8 +134,7 @@ elif page == "Live Feed":
                 if len(res) > 0 and not res[0].empty:
                     match_name = os.path.basename(res[0].iloc[0]['identity']).split('.')[0]
                     dist = res[0].iloc[0]['distance']
-                    # Facenet512 threshold
-                    acc = max(0, int((1 - dist/0.38) * 100))
+                    acc = max(0, int((1 - dist/0.4) * 100))
                     
                     if acc > 25:
                         st.metric("Detected", match_name, f"{acc}% Match")
@@ -154,10 +145,9 @@ elif page == "Live Feed":
                     else:
                         st.warning("Identity: Unknown")
                 else:
-                    st.info("Searching database...")
+                    st.info("No face in database.")
             except Exception as e:
-                # This will help us see if it's a model error or a data error
-                st.error(f"Sync Error: {str(e)}")
+                st.error(f"Sync Fix in Progress: {str(e)}")
         else:
             st.info("Awaiting Handshake...")
 
@@ -165,8 +155,7 @@ elif page == "Log History":
     st.header("📊 Attendance Log")
     if os.path.exists(PKL_LOG):
         with open(PKL_LOG, "rb") as f: data = pickle.load(f)
-        df = pd.DataFrame(data)
-        st.table(df)
+        st.table(pd.DataFrame(data))
         if st.button("🔥 WIPE SESSION DATA"):
             if os.path.exists(PKL_LOG): os.remove(PKL_LOG)
             st.session_state.logged_set = set()
