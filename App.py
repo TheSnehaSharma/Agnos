@@ -12,6 +12,7 @@ LOG_FILE = "attendance_log.csv"
 
 st.set_page_config(page_title="Privacy Face Auth", layout="wide")
 
+# Persistent Storage Initialization
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
@@ -23,7 +24,7 @@ if "logs" not in st.session_state:
         except: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
-# --- FRONTEND ASSETS (No escaping needed here) ---
+# --- ASSETS ---
 
 CSS_CODE = """
 <style>
@@ -44,7 +45,6 @@ JS_CODE = """
     const ctx = canvas.getContext("2d");
     const log = document.getElementById("status-bar");
     
-    // Values injected via .replace()
     const staticImgSrc = "STATIC_IMG_PLACEHOLDER";
     const runMode = "RUN_MODE_PLACEHOLDER";
     
@@ -63,49 +63,37 @@ JS_CODE = """
             });
 
             if (staticImgSrc !== "null") {
-                log.innerText = "STATUS: Processing Uploaded Image...";
+                log.innerText = "STATUS: Analyzing Upload...";
                 staticImg.src = staticImgSrc;
                 staticImg.onload = async () => {
                     const results = await faceLandmarker.detect(staticImg);
                     processResults(results);
                 };
             } else {
-                log.innerText = "STATUS: Starting Camera...";
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
-                video.onloadeddata = () => {
-                    log.innerText = "SYSTEM ONLINE";
-                    predictVideo();
-                };
+                video.onloadeddata = () => { predictVideo(); };
             }
-        } catch (err) {
-            log.innerText = "ERROR: " + err.message;
-        }
+        } catch (err) { log.innerText = "ERROR: " + err.message; }
     }
 
     function processResults(results) {
         canvas.width = (staticImgSrc !== "null") ? staticImg.naturalWidth : video.videoWidth;
         canvas.height = (staticImgSrc !== "null") ? staticImg.naturalHeight : video.videoHeight;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
             drawRect(landmarks);
+            log.innerText = "✅ ENCODING READY";
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
             }, "*");
-            log.innerText = "✅ FACE ENCODED SUCCESSFULLY";
-        } else {
-            log.innerText = "❌ NO FACE DETECTED";
-        }
+        } else { log.innerText = "❌ NO FACE DETECTED"; }
     }
 
     async function predictVideo() {
         const results = faceLandmarker.detectForVideo(video, performance.now());
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             drawRect(results.faceLandmarks[0]);
             window.parent.postMessage({
@@ -119,74 +107,54 @@ JS_CODE = """
     function drawRect(landmarks) {
         const xs = landmarks.map(p => p.x * canvas.width);
         const ys = landmarks.map(p => p.y * canvas.height);
-        const minX = Math.min(...xs), maxX = Math.max(...xs);
-        const minY = Math.min(...ys), maxY = Math.max(...ys);
-        ctx.strokeStyle = "#00FF00";
-        ctx.lineWidth = 5;
-        ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = "#00FF00"; ctx.lineWidth = 5;
+        ctx.strokeRect(Math.min(...xs), Math.min(...ys), Math.max(...xs)-Math.min(...xs), Math.max(...ys)-Math.min(...ys));
     }
-
     init();
 </script>
 """
 
 def get_component_html(img_b64=None):
-    html_template = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>{CSS_CODE}</head>
-    <body>
-        <div id="view">
-            <div id="status-bar">INITIALIZING ENGINE...</div>
-            <video id="webcam" autoplay playsinline muted style="display: {'none' if img_b64 else 'block'}"></video>
-            <img id="static-img" src="" style="display: {'block' if img_b64 else 'none'}">
-            <canvas id="overlay"></canvas>
-        </div>
-        {JS_CODE}
-    </body>
-    </html>
-    """
+    html_template = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
+    html_template += f'<div id="view"><div id="status-bar">...</div>'
+    html_template += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
+    html_template += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
+    html_template += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
     
-    # Use .replace to inject dynamic values into the JS block
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
-    mode_val = "IMAGE" if img_b64 else "VIDEO"
-    
-    final_html = html_template.replace("STATIC_IMG_PLACEHOLDER", img_val)
-    final_html = final_html.replace("RUN_MODE_PLACEHOLDER", mode_val)
-    
-    return final_html
+    return html_template.replace("STATIC_IMG_PLACEHOLDER", img_val).replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO")
 
-# --- STREAMLIT UI ---
+# --- UI ---
 
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
-    st.header("👤 Register via Photo Upload")
+    st.header("👤 Identity Registration")
     name = st.text_input("Name").upper()
     uploaded_file = st.file_uploader("Upload Profile Photo", type=['jpg', 'jpeg', 'png'])
     
-    if uploaded_file and name:
-        bytes_data = uploaded_file.getvalue()
-        b64_img = base64.b64encode(bytes_data).decode()
+    if uploaded_file:
+        b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
+        # Capture the return value directly from the component
+        captured_json = st.components.v1.html(get_component_html(b64_img), height=420)
         
-        # Build and display the component
-        comp_html = get_component_html(b64_img)
-        val = st.components.v1.html(comp_html, height=420)
-        
-        if val and isinstance(val, str):
-            st.session_state.buffered_encoding = val
-            st.success("✅ Facial features extracted.")
-    
-    if st.button("Confirm Registration") and name:
-        if st.session_state.get('buffered_encoding'):
-            st.session_state.db[name] = json.loads(st.session_state.buffered_encoding)
+        # Buffer the data into session state
+        if captured_json:
+            st.session_state.buffered_reg = captured_json
+
+    # Status & Save Logic
+    if "buffered_reg" in st.session_state and name:
+        st.success(f"Encoding detected for {name}. You may now save.")
+        if st.button("Confirm & Save to Database"):
+            st.session_state.db[name] = json.loads(st.session_state.buffered_reg)
             with open(DB_FILE, "w") as f:
                 json.dump(st.session_state.db, f)
-            st.success(f"Registered {name}!")
-            st.session_state.buffered_encoding = None
+            st.success(f"✅ {name} registered!")
+            del st.session_state.buffered_reg
             st.rerun()
-        else:
-            st.error("Face not detected in image yet.")
+    elif uploaded_file:
+        st.info("Waiting for browser to send facial coordinates...")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Scanner")
@@ -194,11 +162,9 @@ elif page == "Live Feed":
     with col1:
         feed_val = st.components.v1.html(get_component_html(), height=420)
     with col2:
-        if feed_val and isinstance(feed_val, str):
+        if feed_val:
             current_face = json.loads(feed_val)
             identified = "Unknown"
-            
-            # Simple Euclidean distance check on landmark points
             for db_name, saved_face in st.session_state.db.items():
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
@@ -206,17 +172,13 @@ elif page == "Live Feed":
                 if dist < 0.05:
                     identified = db_name
                     break
-            
             st.subheader(f"Status: {identified}")
-            
-            if identified != "Unknown":
-                # Ensure we only log them once per session or day
-                if identified not in st.session_state.logs["Name"].values:
-                    now = datetime.now().strftime("%H:%M:%S")
-                    new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
-                    st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
-                    st.session_state.logs.to_csv(LOG_FILE, index=False)
-                    st.toast(f"Marked attendance for {identified}")
+            if identified != "Unknown" and identified not in st.session_state.logs["Name"].values:
+                now = datetime.now().strftime("%H:%M:%S")
+                new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
+                st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
+                st.session_state.logs.to_csv(LOG_FILE, index=False)
+                st.toast(f"Logged {identified}")
 
 elif page == "Log":
     st.header("📊 History")
