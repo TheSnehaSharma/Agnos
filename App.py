@@ -33,54 +33,67 @@ def registration_page():
         if not name or not img_file:
             st.warning("⚠️ Please provide both a name and a photo.")
         else:
-            with st.spinner(f"🧬 AI is analyzing {name}'s face..."):
-                img_bytes = img_file.read()
-                img_base64 = base64.b64encode(img_bytes).decode()
-                
-                js_reg = f"""
-                <script src="{FACE_API_JS}"></script>
-                <script>
-                    async function encode() {{
+            img_bytes = img_file.read()
+            img_base64 = base64.b64encode(img_bytes).decode()
+            
+            # Using a visible component for registration so we can see errors
+            st.info(f"🧬 AI is analyzing {name}'s face...")
+            
+            js_reg = f"""
+            <div id="status" style="font-family: sans-serif; font-size: 12px; color: #666;">Initializing AI Models...</div>
+            <script src="{FACE_API_JS}"></script>
+            <script>
+                const status = document.getElementById('status');
+                async function encode() {{
+                    try {{
                         const MODEL_URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
-                        try {{
-                            await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
-                            await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-                            await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-                            
-                            const img = new Image();
-                            img.src = "data:image/jpeg;base64,{img_base64}";
-                            img.onload = async () => {{
-                                const detections = await faceapi.detectAllFaces(img).withFaceLandmarks().withFaceDescriptors();
-                                if (detections.length === 0) {{
-                                    window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'ERR_NONE'}}, '*');
-                                }} else if (detections.length > 1) {{
-                                    window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'ERR_MULTI'}}, '*');
-                                }} else {{
-                                    window.parent.postMessage({{
-                                        type: 'streamlit:setComponentValue', 
-                                        value: Array.from(detections[0].descriptor)
-                                    }}, '*');
-                                }}
-                            }};
-                        }} catch (e) {{
-                            window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'ERR_LOAD'}}, '*');
-                        }}
+                        status.innerText = "Loading weights...";
+                        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+                        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                        
+                        status.innerText = "Processing image...";
+                        const img = new Image();
+                        img.src = "data:image/jpeg;base64,{img_base64}";
+                        img.onload = async () => {{
+                            const detections = await faceapi.detectAllFaces(img).withFaceLandmarks().withFaceDescriptors();
+                            if (detections.length === 0) {{
+                                status.innerText = "Error: No face detected";
+                                window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'ERR_NONE'}}, '*');
+                            }} else if (detections.length > 1) {{
+                                status.innerText = "Error: Multiple faces";
+                                window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'ERR_MULTI'}}, '*');
+                            }} else {{
+                                status.innerText = "Success!";
+                                window.parent.postMessage({{
+                                    type: 'streamlit:setComponentValue', 
+                                    value: Array.from(detections[0].descriptor)
+                                }}, '*');
+                            }}
+                        }};
+                    }} catch (e) {{
+                        status.innerText = "Load Error: " + e.message;
+                        window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'ERR_LOAD'}}, '*');
                     }}
-                    encode();
-                </script>
-                """
-                result = components.html(js_reg, height=0)
-                
-                if result == "ERR_NONE":
-                    st.error("❌ No face detected. Please use a clearer photo.")
-                elif result == "ERR_MULTI":
-                    st.error("❌ Multiple people detected. Please upload a solo photo.")
-                elif result == "ERR_LOAD":
-                    st.error("❌ AI Models failed to load. Check internet connection.")
-                elif isinstance(result, list):
-                    if not any(u['name'] == name for u in st.session_state.registered_users):
-                        st.session_state.registered_users.append({"name": name, "encoding": result})
-                        st.success(f"✅ {name} registered successfully!")
+                }}
+                encode();
+            </script>
+            """
+            # Height is 30 so you can see the small status text
+            result = components.html(js_reg, height=50)
+            
+            if result == "ERR_NONE":
+                st.error("❌ No face detected. Please use a clearer photo.")
+            elif result == "ERR_MULTI":
+                st.error("❌ Multiple people detected. Please upload a solo photo.")
+            elif result == "ERR_LOAD":
+                st.error("❌ AI Models failed to load. Please check your internet connection.")
+            elif isinstance(result, list):
+                if not any(u['name'] == name for u in st.session_state.registered_users):
+                    st.session_state.registered_users.append({"name": name, "encoding": result})
+                    st.success(f"✅ {name} registered successfully!")
+                else:
+                    st.info(f"{name} is already registered.")
 
 # --- PAGE 2: LIVE ATTENDANCE ---
 def attendance_page():
@@ -97,7 +110,7 @@ def attendance_page():
         <video id="video" autoplay muted style="width: 100%; max-width: 500px; border-radius: 10px;"></video>
         <canvas id="canvas" style="position: absolute; top: 0; left: 50%; transform: translateX(-50%);"></canvas>
         <audio id="chime" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3"></audio>
-        <div id="ui-label" style="background: rgba(0,0,0,0.6); color: white; padding: 10px; margin-top: 10px; border-radius: 5px;">
+        <div id="ui-label" style="background: rgba(0,0,0,0.6); color: white; padding: 10px; margin-top: 10px; border-radius: 5px; font-family: sans-serif;">
             Initializing AI...
         </div>
     </div>
@@ -113,6 +126,7 @@ def attendance_page():
         async function start() {{
             const MODEL_URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
             try {{
+                label.innerText = "Loading AI models...";
                 await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                 await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
                 await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
@@ -130,7 +144,7 @@ def attendance_page():
                     canvas.width = displaySize.width;
                     canvas.height = displaySize.height;
                     faceapi.matchDimensions(canvas, displaySize);
-                    label.innerText = "AI Active: Scanning...";
+                    label.innerText = "AI Scanning Active";
 
                     setInterval(async () => {{
                         const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptors();
@@ -142,63 +156,3 @@ def attendance_page():
                             label.innerText = "⚠️ Multiple faces detected!";
                         }} else if (detections.length === 1) {{
                             const result = faceMatcher.findBestMatch(resizedDetections[0].descriptor);
-                            const box = resizedDetections[0].detection.box;
-                            new faceapi.draw.DrawBox(box, {{ label: result.toString() }}).draw(canvas);
-
-                            if (result.label !== 'unknown') {{
-                                window.parent.postMessage({{type: 'streamlit:setComponentValue', value: result.label}}, '*');
-                                chime.play();
-                            }}
-                        }}
-                    }}, 1200);
-                }});
-            }} catch (e) {{ label.innerText = "Error: " + e.message; }}
-        }}
-        start();
-    </script>
-    """
-    
-    match_name = components.html(js_attendance, height=600)
-
-    if match_name and match_name in [u['name'] for u in st.session_state.registered_users]:
-        if match_name not in st.session_state.already_logged:
-            ts = datetime.now()
-            entry = {
-                "Name": match_name, 
-                "Date": ts.strftime("%Y-%m-%d"), 
-                "Time": ts.strftime("%H:%M:%S"), 
-                "Status": "Present"
-            }
-            st.session_state.attendance_records.append(entry)
-            st.session_state.already_logged.add(match_name)
-            pd.DataFrame([entry]).to_csv(LOG_FILE, mode='a', header=False, index=False)
-            st.success(f"Attendance Recorded: {match_name}")
-            st.balloons()
-
-# --- PAGE 3: LOGS ---
-def logs_page():
-    st.title("📄 Attendance Logs")
-    present_names = [r["Name"] for r in st.session_state.attendance_records]
-    all_rows = list(st.session_state.attendance_records)
-    
-    for user in st.session_state.registered_users:
-        if user['name'] not in present_names:
-            all_rows.append({
-                "Name": user['name'], 
-                "Date": datetime.now().strftime("%Y-%m-%d"), 
-                "Time": "-", 
-                "Status": "Absent"
-            })
-    
-    df = pd.DataFrame(all_rows)
-    st.dataframe(df, use_container_width=True)
-    st.download_button("📥 Download Report", df.to_csv(index=False).encode('utf-8'), "attendance.csv", "text/csv")
-
-# --- NAVIGATION ---
-page = st.sidebar.radio("Navigation", ["Register", "Attendance", "View Logs"])
-if page == "Register":
-    registration_page()
-elif page == "Attendance":
-    attendance_page()
-else:
-    logs_page()
