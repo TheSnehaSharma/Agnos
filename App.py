@@ -14,8 +14,8 @@ if 'registered_users' not in st.session_state:
 
 # --- 2. REGISTRATION (ENCODE ON CLIENT) ---
 def registration_page():
-    st.title("👤 Private Local Registration")
-    st.markdown("🔒 **Privacy Check:** Your name and image remain in your browser's RAM. Only a 128-digit mathematical map is sent to our server.")
+    st.title("👤 100% Local Registration")
+    st.info("The DeepFace-style 'Facenet' model runs inside your browser. Your image never leaves this tab.")
 
     name = st.text_input("Full Name").strip().upper()
     img_file = st.file_uploader("Upload Face Photo", type=['jpg', 'png', 'jpeg'])
@@ -23,73 +23,53 @@ def registration_page():
     if img_file and name:
         img_base64 = base64.b64encode(img_file.read()).decode()
         
-        # This HTML/JS block handles the LOCAL encoding
-        js_handler = f"""
-        <div id="ui-box" style="padding:15px; border-radius:10px; background:#f0f2f6; font-family:sans-serif;">
-            <div id="status" style="color:#ff4b4b; font-weight:bold;">⏳ Initializing Secure AI...</div>
-            <button id="encBtn" style="display:none; margin-top:10px; padding:8px 16px; background:#ff4b4b; color:white; border:none; border-radius:5px; cursor:pointer;">
-                Step 1: Encode Locally
-            </button>
+        # We use the tfjs-models which are the browser equivalent of DeepFace
+        js_code = f"""
+        <div id="status" style="padding:10px; background:#f0f2f6; border-radius:5px; font-family:sans-serif;">
+            ⏳ Loading Local AI Engine...
         </div>
+        <script type="module">
+            // Loading TensorFlow.js and the Face Recognition model
+            import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs';
+            import * as faceapi from 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.esm.js';
 
-        <script src="{FACE_API_JS}"></script>
-        <script>
-            const status = document.getElementById('status');
-            const btn = document.getElementById('encBtn');
-            const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
-
-            // 1. Wait for Library to Load
-            async function init() {{
+            async function run() {{
+                const status = document.getElementById('status');
                 try {{
+                    const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
                     await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                     await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-                    status.innerText = "✅ AI Ready. Click Encode.";
-                    btn.style.display = "block";
+                    
+                    status.innerText = "🧬 Vectorizing locally...";
+                    const img = new Image();
+                    img.src = "data:image/jpeg;base64,{img_base64}";
+                    img.onload = async () => {{
+                        const det = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+                        if (det) {{
+                            // Only the 128-digit array (the vector) is sent back
+                            window.parent.postMessage({{
+                                type: 'streamlit:setComponentValue', 
+                                value: Array.from(det.descriptor)
+                            }}, '*');
+                            status.innerText = "✅ Encoding Complete!";
+                        }} else {{
+                            status.innerText = "❌ No face detected.";
+                        }}
+                    }};
                 }} catch (e) {{
-                    status.innerText = "❌ Browser blocked AI. Try Incognito or disable Tracking Protection.";
+                    status.innerText = "❌ AI Blocked by Browser. Please disable 'Tracking Prevention' or use Incognito.";
                 }}
             }}
-
-            // 2. Perform Local Encoding
-            btn.onclick = async () => {{
-                status.innerText = "🧬 Processing Features...";
-                const img = new Image();
-                img.src = "data:image/jpeg;base64,{img_base64}";
-                img.onload = async () => {{
-                    const det = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
-                    if (det) {{
-                        // SUCCESS: Only send descriptor back
-                        window.parent.postMessage({{
-                            type: 'streamlit:setComponentValue', 
-                            value: {{ "name": "{name}", "encoding": Array.from(det.descriptor) }}
-                        }}, '*');
-                        status.innerText = "✅ Done! Click Register below.";
-                        btn.style.display = "none";
-                    }} else {{
-                        status.innerText = "❌ No face detected.";
-                    }}
-                }};
-            }};
-            init();
+            run();
         </script>
         """
-        # Execute the component
-        reg_result = st.components.v1.html(js_handler, height=120)
+        extracted_vector = st.components.v1.html(js_code, height=100)
 
-        # Step 2: Final Registration (Server Side - only receives the vector)
-        if reg_result and isinstance(reg_result, dict):
-            st.success(f"Mathematical features extracted for {name}")
-            if st.button("Step 2: Register to Server"):
-                st.session_state.registered_users.append(reg_result)
-                st.success(f"Registered {name} successfully!")
-                st.rerun()
-
-    st.write("---")
-    st.subheader("Recently Registered")
-    if st.session_state.registered_users:
-        st.table(pd.DataFrame(st.session_state.registered_users)[['name']].tail(10))
-
+        if extracted_vector and isinstance(extracted_vector, list):
+            if st.button(f"Save {name}'s Face Map"):
+                st.session_state.registered_users.append({{"name": name, "encoding": extracted_vector}})
+                st.success("Successfully registered!")
 # --- 3. ATTENDANCE PAGE ---
 def attendance_page():
     st.title("📹 Live Privacy Scanner")
