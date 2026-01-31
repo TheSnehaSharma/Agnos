@@ -8,39 +8,44 @@ import pickle
 import face_recognition
 from datetime import datetime
 
-# --- CONFIG ---
+# --- DIRECTORY SETUP ---
 DB_FOLDER = "registered_faces"
 PKL_LOG = "attendance_data.pkl"
 
-if not os.path.exists(DB_FOLDER):
-    os.makedirs(DB_FOLDER)
+for folder in [DB_FOLDER]:
+    if not os.path.exists(folder):
+        os.makedirs(folder)
 
-st.set_page_config(page_title="Agnos: Dlib Edition", layout="wide")
+st.set_page_config(page_title="Agnos Cloud Biometric", layout="wide")
 
-# --- FACE DATABASE ENGINE ---
+# --- DLIB DATABASE ENGINE ---
 @st.cache_resource
-def load_known_faces():
+def load_face_encodings():
+    """Generates 128-d face vectors for all registered images once."""
     known_encodings = []
     known_names = []
     
+    if not os.listdir(DB_FOLDER):
+        return [], []
+
     for file in os.listdir(DB_FOLDER):
         if file.endswith(('.jpg', '.png', '.jpeg')):
-            img_path = os.path.join(DB_FOLDER, file)
-            image = face_recognition.load_image_file(img_path)
-            encodings = face_recognition.face_encodings(image)
-            
-            if encodings:
-                known_encodings.append(encodings[0])
+            path = os.path.join(DB_FOLDER, file)
+            # Load and encode
+            img = face_recognition.load_image_file(path)
+            encs = face_recognition.face_encodings(img)
+            if encs:
+                known_encodings.append(encs[0])
                 known_names.append(file.split('.')[0])
-    
     return known_encodings, known_names
 
-# --- JAVASCRIPT BRIDGE (MEDIAPIPE) ---
+# --- JAVASCRIPT: THE HYBRID BRIDGE ---
+# Uses MediaPipe for browser-side rectangles
 JS_CODE = """
-<div style="position:relative; width:100%; max-width:500px; margin:auto; background:#000; border-radius:20px; overflow:hidden;">
+<div style="position:relative; width:100%; max-width:500px; margin:auto; background:#000; border-radius:15px; overflow:hidden;">
     <video id="v" autoplay playsinline style="display:none;"></video>
     <canvas id="d" style="width:100%; height:auto; display:block;"></canvas>
-    <div id="label" style="position:absolute; bottom:15px; left:0; width:100%; text-align:center; color:#0F0; font-family:monospace; font-weight:bold; font-size:22px; text-shadow:2px 2px #000;">ST_NAME_HERE</div>
+    <div id="status" style="position:absolute; bottom:15px; left:0; width:100%; text-align:center; color:#0F0; font-family:monospace; font-weight:bold; font-size:18px; text-shadow:2px 2px #000;">ST_NAME_HERE</div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
@@ -70,7 +75,7 @@ JS_CODE = """
                            bbox.yCenter * d.height - (bbox.height * d.height / 2),
                            bbox.width * d.width, bbox.height * d.height);
 
-            // Send to Streamlit
+            // Send 160x160 Crop to Python
             const c = document.createElement('canvas');
             c.width = 160; c.height = 160;
             c.getContext('2d').drawImage(v, 
@@ -82,7 +87,7 @@ JS_CODE = """
             
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
-                value: c.toDataURL('image/jpeg', 0.4)
+                value: c.toDataURL('image/jpeg', 0.5)
             }, "*");
         }
     });
@@ -95,72 +100,66 @@ JS_CODE = """
 </script>
 """
 
-# --- UI NAVIGATION ---
-page = st.sidebar.radio("Navigate", ["Register Face", "Live Attendance", "Log History"])
+# --- NAVIGATION ---
+nav = st.sidebar.radio("Go to", ["Register User", "Live Attendance", "Attendance Logs"])
 
-if page == "Register Face":
+if nav == "Register User":
     st.header("👤 Face Registration")
     with st.form("reg"):
-        name = st.text_input("NAME").upper()
-        file = st.file_uploader("Upload Image", type=['jpg','png'])
-        if st.form_submit_button("Save User"):
+        name = st.text_input("FULL NAME").upper()
+        file = st.file_uploader("Upload Profile Image", type=['jpg', 'png', 'jpeg'])
+        if st.form_submit_button("Save to Database"):
             if name and file:
                 with open(os.path.join(DB_FOLDER, f"{name}.jpg"), "wb") as f:
                     f.write(file.getbuffer())
-                st.cache_resource.clear() # Refresh the face database
-                st.success(f"Registered {name}")
+                st.cache_resource.clear() # Force re-encoding
+                st.success(f"Successfully Registered {name}")
 
     st.markdown("---")
     st.subheader("🗂️ Database Manager")
-    for f in [f for f in os.listdir(DB_FOLDER) if f.endswith(('.jpg', '.png'))]:
+    db_files = [f for f in os.listdir(DB_FOLDER) if f.endswith(('.jpg', '.png'))]
+    for f in db_files:
         c1, c2 = st.columns([4, 1])
         c1.write(f"✅ {f.split('.')[0]}")
-        if c2.button("Delete", key=f"del_{f}"):
+        if c2.button("Delete", key=f):
             os.remove(os.path.join(DB_FOLDER, f))
             st.cache_resource.clear()
             st.rerun()
 
-elif page == "Live Attendance":
-    st.header("📹 Biometric Feed")
-    known_encodings, known_names = load_known_faces()
+elif nav == "Live Attendance":
+    st.header("📹 Live Scanner")
+    known_enc, known_names = load_face_encodings()
     
-    current_name = st.session_state.get("last_name", "SEARCHING...")
-    final_js = JS_CODE.replace("ST_NAME_HERE", current_name)
-
+    current_status = st.session_state.get("last_id", "SEARCHING...")
+    final_js = JS_CODE.replace("ST_NAME_HERE", current_status)
+    
     col_v, col_s = st.columns([2, 1])
     with col_v:
         img_data = st.components.v1.html(final_js, height=450)
 
     with col_s:
         st.subheader("System Status")
-        if not known_encodings:
-            st.warning("⚠️ Database is empty.")
+        if not known_enc:
+            st.warning("No users in database. Please register first.")
         elif img_data:
             try:
-                # 1. Decode Frame
+                # 1. Decode & Fix Padding
                 encoded = str(img_data).split(",")[1]
-                missing_padding = len(encoded) % 4
-                if missing_padding: encoded += '=' * (4 - missing_padding)
-                
+                encoded += "=" * ((4 - len(encoded) % 4) % 4)
                 nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 
-                # 2. face_recognition Logic
-                current_encodings = face_recognition.face_encodings(rgb_frame)
-                
-                if current_encodings:
-                    # Compare against database
-                    matches = face_recognition.compare_faces(known_encodings, current_encodings[0], tolerance=0.5)
-                    name = "UNKNOWN USER"
-
+                # 2. Identify
+                curr_enc = face_recognition.face_encodings(rgb)
+                if curr_enc:
+                    matches = face_recognition.compare_faces(known_enc, curr_enc[0], tolerance=0.5)
                     if True in matches:
-                        first_match_index = matches.index(True)
-                        name = known_names[first_match_index]
-                        st.session_state.last_name = f"VERIFIED: {name}"
-                        st.metric("Identity", name)
+                        name = known_names[matches.index(True)]
+                        st.session_state.last_id = f"VERIFIED: {name}"
+                        st.metric("Detected", name)
                         
-                        # Log Attendance
+                        # Save Log
                         logs = []
                         if os.path.exists(PKL_LOG):
                             with open(PKL_LOG, "rb") as f: logs = pickle.load(f)
@@ -168,20 +167,18 @@ elif page == "Live Attendance":
                         if not any(e['Name'] == name and e['Date'] == today for e in logs):
                             logs.append({"Name": name, "Time": datetime.now().strftime("%H:%M:%S"), "Date": today})
                             with open(PKL_LOG, "wb") as f: pickle.dump(logs, f)
-                            st.toast(f"✅ Logged {name}")
+                            st.toast(f"✅ Attendance Logged: {name}")
                     else:
-                        st.session_state.last_name = "UNKNOWN"
-                        st.info("Face not recognized.")
-                else:
-                    st.info("Align your face...")
+                        st.session_state.last_id = "UNKNOWN USER"
             except Exception as e:
-                st.error(f"Engine Log: {str(e)}")
-        else:
-            st.info("Awaiting Handshake...")
+                st.error("Processing Frame...")
 
-elif page == "Log History":
-    st.header("📊 Attendance Records")
+elif nav == "Attendance Logs":
+    st.header("📊 Logs")
     if os.path.exists(PKL_LOG):
         with open(PKL_LOG, "rb") as f: data = pickle.load(f)
-        st.table(pd.DataFrame(data))
-    else: st.info("No records.")
+        if data:
+            st.table(pd.DataFrame(data))
+            if st.button("Clear Records"):
+                os.remove(PKL_LOG); st.rerun()
+        else: st.info("No records today.")
