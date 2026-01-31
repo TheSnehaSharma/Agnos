@@ -9,7 +9,7 @@ from deepface import DeepFace
 from datetime import datetime
 from streamlit_javascript import st_javascript
 
-# --- CONFIG & DIRS ---
+# --- 1. SETUP & CONFIG ---
 DB_FOLDER = "registered_faces"
 PKL_LOG = "attendance_data.pkl"
 MODEL_NAME = "Facenet512"
@@ -17,9 +17,9 @@ MODEL_NAME = "Facenet512"
 if not os.path.exists(DB_FOLDER):
     os.makedirs(DB_FOLDER)
 
-st.set_page_config(page_title="Iron-Vision: Continuous Bridge", layout="wide")
+st.set_page_config(page_title="Iron-Vision: Full Bridge", layout="wide")
 
-# --- MODEL CACHE ---
+# --- 2. AI ENGINE CACHE ---
 @st.cache_resource
 def load_ai():
     try:
@@ -30,48 +30,61 @@ def load_ai():
 
 load_ai()
 
-# --- JAVASCRIPT: THE DUAL-BUFFER BRIDGE ---
-# This script creates a persistent video and returns the data to Python.
-JS_BRIDGE_CODE = """
+# --- 3. THE "HARDENED" JS BRIDGE ---
+JS_CAMERA_PORTAL = """
 async () => {
-    // 1. Initialize persistent camera stream
-    if (!window.vStream) {
-        window.vStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
-        window.vEl = document.createElement('video');
-        window.vEl.srcObject = window.vStream;
-        await window.vEl.play();
-        window.cEl = document.createElement('canvas');
-        window.cEl.width = 320;
-        window.cEl.height = 240;
+    // 1. Diagnostic: Check for API access
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return "ERROR: Camera API blocked by browser security.";
     }
-    
-    const ctx = window.cEl.getContext('2d');
-    ctx.drawImage(window.vEl, 0, 0, 320, 240);
-    
-    // Return frame to Python
-    return window.cEl.toDataURL('image/jpeg', 0.5);
+
+    try {
+        // 2. Persistent Stream setup
+        if (!window.activeStream) {
+            window.activeStream = await navigator.mediaDevices.getUserMedia({ 
+                video: { width: 320, height: 240, facingMode: "user" } 
+            });
+            window.videoElement = document.createElement('video');
+            window.videoElement.srcObject = window.activeStream;
+            window.videoElement.setAttribute("playsinline", true);
+            await window.videoElement.play();
+            window.canvasElement = document.createElement('canvas');
+        }
+
+        // 3. Frame Capture
+        const ctx = window.canvasElement.getContext('2d');
+        window.canvasElement.width = 320;
+        window.canvasElement.height = 240;
+        ctx.drawImage(window.videoElement, 0, 0, 320, 240);
+        
+        // 4. Return Base64 String
+        return window.canvasElement.toDataURL('image/jpeg', 0.5);
+    } catch (err) {
+        return "ERROR: " + err.message;
+    }
 }
 """
 
-# --- UI NAVIGATION ---
-page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log History"])
+# --- 4. NAVIGATION ---
+page = st.sidebar.radio("Navigate", ["Register Face", "Live Attendance", "Manage Logs"])
 
-if page == "Register":
+if page == "Register Face":
     st.header("👤 Face Registration")
-    with st.form("registration_form"):
+    
+    with st.form("registration", clear_on_submit=True):
         name = st.text_input("FULL NAME").upper()
-        file = st.file_uploader("Upload Profile Image", type=['jpg', 'png'])
+        file = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'])
         if st.form_submit_button("Register User"):
             if name and file:
-                path = os.path.join(DB_FOLDER, f"{name}.jpg")
-                with open(path, "wb") as f:
+                with open(os.path.join(DB_FOLDER, f"{name}.jpg"), "wb") as f:
                     f.write(file.getbuffer())
+                # Clean DeepFace indices
                 for p in [f for f in os.listdir(DB_FOLDER) if f.endswith('.pkl')]:
                     os.remove(os.path.join(DB_FOLDER, p))
                 st.success(f"Registered {name}")
 
     st.markdown("---")
-    st.subheader("🗂️ Database Manager")
+    st.subheader("🗂️ Database Management")
     db_files = [f for f in os.listdir(DB_FOLDER) if f.endswith(('.jpg', '.png'))]
     for f in db_files:
         c1, c2 = st.columns([4, 1])
@@ -80,30 +93,35 @@ if page == "Register":
             os.remove(os.path.join(DB_FOLDER, f))
             st.rerun()
 
-elif page == "Live Feed":
+elif page == "Live Attendance":
     st.header("📹 Biometric Scanner")
     col_v, col_s = st.columns([2, 1])
     
     with col_v:
-        # THE BRIDGE: Python calls JS and waits for the return string
-        img_data = st_javascript(JS_BRIDGE_CODE)
+        # PULLING THE PORTAL
+        raw_frame = st_javascript(JS_CAMERA_PORTAL)
         
-        if img_data and len(str(img_data)) > 100:
-            # Displaying the frame in Python to verify it reached the server
-            st.image(img_data, use_container_width=True, caption="Verified Bridge Link")
+        if raw_frame:
+            if str(raw_frame).startswith("ERROR"):
+                st.error(raw_frame)
+                st.info("💡 Tip: Ensure you are using HTTPS and have granted camera permissions to the site.")
+            elif len(str(raw_frame)) > 100:
+                st.image(raw_frame, use_container_width=True, caption="Active Neural Link")
+            else:
+                st.warning("Handshake Active: Warming up sensor...")
         else:
-            st.warning("Awaiting Camera Portal... (Check browser permissions)")
+            st.info("Awaiting Camera Portal...")
 
     with col_s:
         st.subheader("System Status")
-        if img_data and "base64," in img_data:
+        if raw_frame and "base64," in str(raw_frame):
             try:
-                # Decode
-                encoded_data = img_data.split(",")[1]
-                nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+                # Decoding
+                header, encoded = str(raw_frame).split(",", 1)
+                nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
-                # Identify
+                # Identification
                 res = DeepFace.find(img_path=frame, db_path=DB_FOLDER, 
                                    model_name=MODEL_NAME, enforce_detection=False, 
                                    detector_backend="opencv", silent=True)
@@ -111,38 +129,38 @@ elif page == "Live Feed":
                 if len(res) > 0 and not res[0].empty:
                     m_name = os.path.basename(res[0].iloc[0]['identity']).split('.')[0]
                     dist = res[0].iloc[0]['distance']
-                    acc = max(0, int((1 - dist/0.38) * 100))
+                    acc = max(0, int((1 - dist/0.4) * 100))
                     
                     if acc > 30:
                         st.metric("Detected", m_name, f"{acc}% Match")
-                        # Log logic
+                        # Add to Logs
                         logs = []
                         if os.path.exists(PKL_LOG):
                             with open(PKL_LOG, "rb") as f: logs = pickle.load(f)
+                        
                         today = datetime.now().strftime("%Y-%m-%d")
                         if not any(e['Name'] == m_name and e['Date'] == today for e in logs):
                             logs.append({"Name": m_name, "Time": datetime.now().strftime("%H:%M:%S"), "Date": today})
                             with open(PKL_LOG, "wb") as f: pickle.dump(logs, f)
                             st.toast(f"✅ Logged {m_name}")
                     else:
-                        st.warning("Identity Unknown")
+                        st.warning("Access Denied: Unknown")
                 else:
-                    st.info("Scanning database...")
+                    st.info("Scanning...")
             except Exception as e:
                 st.error("Engine Resyncing...")
         
-        # This keeps the "Real-time" loop moving
-        if st.button("🔄 Sync New Frame"):
+        if st.button("📸 Sync Feed"):
             st.rerun()
 
-elif page == "Log History":
+elif page == "Manage Logs":
     st.header("📊 Attendance Log")
     if os.path.exists(PKL_LOG):
         with open(PKL_LOG, "rb") as f: data = pickle.load(f)
         if data:
             st.table(pd.DataFrame(data))
-            if st.button("Clear Logs"):
+            if st.button("🔥 Clear All Records"):
                 os.remove(PKL_LOG)
                 st.rerun()
-        else: st.info("No records.")
-    else: st.info("No logs found.")
+        else: st.info("No records found.")
+    else: st.info("Log file not found.")
