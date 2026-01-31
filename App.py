@@ -6,13 +6,12 @@ import os
 import base64
 from datetime import datetime
 
-# --- CONFIGURATION ---
+# --- CONFIG & STORAGE ---
 DB_FILE = "registered_faces.json"
 LOG_FILE = "attendance_log.csv"
 
 st.set_page_config(page_title="Privacy Face Auth", layout="wide")
 
-# Persistent Storage
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: st.session_state.db = json.load(f)
@@ -24,7 +23,7 @@ if "logs" not in st.session_state:
         except: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
-# --- ASSETS ---
+# --- FRONTEND ASSETS ---
 
 CSS_CODE = """
 <style>
@@ -63,14 +62,24 @@ JS_CODE = """
             });
 
             if (staticImgSrc !== "null") {
-                log.innerText = "STATUS: Extracting Face Landmarks...";
+                log.innerText = "STATUS: Extrapolating Landmarks...";
                 staticImg.src = staticImgSrc;
                 staticImg.onload = async () => {
                     const results = await faceLandmarker.detect(staticImg);
                     if (results.faceLandmarks && results.faceLandmarks.length > 0) {
-                        processResults(results);
+                        const landmarks = results.faceLandmarks[0];
+                        drawRect(landmarks);
+                        log.innerText = "✅ DATA READY - PINGING PYTHON...";
+                        
+                        // REPEAT PING: Keep sending until the user clicks save
+                        setInterval(() => {
+                            window.parent.postMessage({
+                                type: "streamlit:setComponentValue",
+                                value: JSON.stringify(landmarks)
+                            }, "*");
+                        }, 500); 
                     } else {
-                        log.innerText = "❌ ERROR: No face found in image.";
+                        log.innerText = "❌ NO FACE IN PHOTO";
                     }
                 };
             } else {
@@ -78,28 +87,7 @@ JS_CODE = """
                 video.srcObject = stream;
                 video.onloadeddata = () => { predictVideo(); };
             }
-        } catch (err) { log.innerText = "ERROR: " + err.message; }
-    }
-
-    function processResults(results) {
-        canvas.width = (staticImgSrc !== "null") ? staticImg.naturalWidth : video.videoWidth;
-        canvas.height = (staticImgSrc !== "null") ? staticImg.naturalHeight : video.videoHeight;
-        const landmarks = results.faceLandmarks[0];
-        
-        // Visual feedback
-        const xs = landmarks.map(p => p.x * canvas.width);
-        const ys = landmarks.map(p => p.y * canvas.height);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.strokeStyle = "#00FF00"; ctx.lineWidth = 5;
-        ctx.strokeRect(Math.min(...xs), Math.min(...ys), Math.max(...xs)-Math.min(...xs), Math.max(...ys)-Math.min(...ys));
-        
-        log.innerText = "✅ ENCODING COMPLETE";
-
-        // Dispatch back to Streamlit
-        window.parent.postMessage({
-            type: "streamlit:setComponentValue",
-            value: JSON.stringify(landmarks)
-        }, "*");
+        } catch (err) { log.innerText = "CRITICAL: " + err.message; }
     }
 
     async function predictVideo() {
@@ -107,12 +95,7 @@ JS_CODE = """
         canvas.width = video.videoWidth; canvas.height = video.videoHeight;
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
-            const xs = landmarks.map(p => p.x * canvas.width);
-            const ys = landmarks.map(p => p.y * canvas.height);
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.strokeStyle = "#00FF00"; ctx.lineWidth = 5;
-            ctx.strokeRect(Math.min(...xs), Math.min(...ys), Math.max(...xs)-Math.min(...xs), Math.max(...ys)-Math.min(...ys));
-            
+            drawRect(landmarks);
             window.parent.postMessage({
                 type: "streamlit:setComponentValue",
                 value: JSON.stringify(landmarks)
@@ -121,6 +104,13 @@ JS_CODE = """
         window.requestAnimationFrame(predictVideo);
     }
 
+    function drawRect(landmarks) {
+        const xs = landmarks.map(p => p.x * canvas.width);
+        const ys = landmarks.map(p => p.y * canvas.height);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = "#00FF00"; ctx.lineWidth = 5;
+        ctx.strokeRect(Math.min(...xs), Math.min(...ys), Math.max(...xs)-Math.min(...xs), Math.max(...ys)-Math.min(...ys));
+    }
     init();
 </script>
 """
@@ -135,7 +125,7 @@ def get_component_html(img_b64=None):
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
     return html_template.replace("STATIC_IMG_PLACEHOLDER", img_val).replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO")
 
-# --- UI ---
+# --- UI NAVIGATION ---
 
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
@@ -146,34 +136,27 @@ if page == "Register":
     
     if uploaded_file:
         b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
-        # The return value of the component is assigned to 'captured_json'
-        captured_json = st.components.v1.html(get_component_html(b64_img), height=420)
+        # Captured from the iframe via setInterval loop in JS
+        captured_data = st.components.v1.html(get_component_html(b64_img), height=420)
         
-        # Buffer the data immediately if it's a string
-        if isinstance(captured_json, str):
-            st.session_state.buffered_reg = captured_json
+        if isinstance(captured_data, str):
+            st.session_state.buffered_reg = captured_data
 
-    # UI Flow
+    # Save logic
     if "buffered_reg" in st.session_state and name:
-        st.success(f"Face encoded for {name}!")
+        st.success(f"Encoding locked for {name}. Confirm below.")
         if st.button("Confirm & Save to Database"):
-            try:
-                # Retrieve from session state, not the component direct
-                data = st.session_state.buffered_reg
-                st.session_state.db[name] = json.loads(data)
-                with open(DB_FILE, "w") as f:
-                    json.dump(st.session_state.db, f)
-                st.success(f"✅ {name} added to vault.")
-                # Clean up and reset
-                del st.session_state.buffered_reg
-                st.rerun()
-            except Exception as e:
-                st.error(f"Save failed: {e}")
+            st.session_state.db[name] = json.loads(st.session_state.buffered_reg)
+            with open(DB_FILE, "w") as f:
+                json.dump(st.session_state.db, f)
+            st.success(f"Successfully saved {name}!")
+            del st.session_state.buffered_reg
+            st.rerun()
     elif uploaded_file:
-        st.info("Reading image... please wait for 'Encoding Complete' message above.")
+        st.info("🔄 Processing image... Please look for the green success box.")
 
 elif page == "Live Feed":
-    st.header("📹 Attendance Feed")
+    st.header("📹 Attendance Scanner")
     col1, col2 = st.columns([3, 1])
     with col1:
         feed_val = st.components.v1.html(get_component_html(), height=420)
@@ -181,8 +164,6 @@ elif page == "Live Feed":
         if isinstance(feed_val, str):
             current_face = json.loads(feed_val)
             identified = "Unknown"
-            
-            # Efficient landmark comparison
             for db_name, saved_face in st.session_state.db.items():
                 curr_arr = np.array([[p['x'], p['y']] for p in current_face[:30]])
                 save_arr = np.array([[p['x'], p['y']] for p in saved_face[:30]])
@@ -190,15 +171,13 @@ elif page == "Live Feed":
                 if dist < 0.05:
                     identified = db_name
                     break
-            
             st.subheader(f"Status: {identified}")
-            if identified != "Unknown":
-                if identified not in st.session_state.logs["Name"].values:
-                    now = datetime.now().strftime("%H:%M:%S")
-                    new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
-                    st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
-                    st.session_state.logs.to_csv(LOG_FILE, index=False)
-                    st.toast(f"Logged {identified}")
+            if identified != "Unknown" and identified not in st.session_state.logs["Name"].values:
+                now = datetime.now().strftime("%H:%M:%S")
+                new_entry = pd.DataFrame({"Name": [identified], "Time": [now]})
+                st.session_state.logs = pd.concat([st.session_state.logs, new_entry], ignore_index=True)
+                st.session_state.logs.to_csv(LOG_FILE, index=False)
+                st.toast(f"Logged {identified}")
 
 elif page == "Log":
     st.header("📊 History")
