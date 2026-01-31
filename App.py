@@ -23,11 +23,13 @@ if "logs" not in st.session_state:
     else: st.session_state.logs = pd.DataFrame(columns=["Name", "Time"])
 
 # --- FRONTEND CODE ---
+# Corrected CDN URLs for MediaPipe 0.10.3
 INTERFACE_CODE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs" type="module"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js"></script>
     <style>
         body { margin:0; background: #0e1117; color: #00FF00; font-family: monospace; }
         #view { position: relative; width: 100%; height: 400px; border-radius: 12px; overflow: hidden; background: #000; border: 1px solid #333; }
@@ -37,7 +39,7 @@ INTERFACE_CODE = """
 </head>
 <body>
     <div id="view">
-        <div id="status-bar">STATUS: Waiting for Library...</div>
+        <div id="status-bar">STATUS: Checking Google AI Engine...</div>
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="overlay"></canvas>
     </div>
@@ -49,21 +51,23 @@ INTERFACE_CODE = """
         let faceLandmarker;
 
         async function init() {
-            // Check if library loaded
-            if (typeof tasksVision === 'undefined') {
-                log.innerText = "ERROR: Google Library failed to load. Check Internet/CORS.";
+            // Check if library loaded via global namespace
+            const visionLib = window.tasksVision;
+            
+            if (!visionLib) {
+                log.innerText = "ERROR: CDN blocked or file not found. Try disabling Ad-Block.";
                 log.style.color = "#FF4B4B";
                 return;
             }
 
             try {
-                log.innerText = "STATUS: Resolving Wasm...";
-                const vision = await tasksVision.FilesetResolver.forVisionTasks(
+                log.innerText = "STATUS: Connecting to WASM... (Wait 5-10s)";
+                const vision = await visionLib.FilesetResolver.forVisionTasks(
                     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
                 );
                 
-                log.innerText = "STATUS: Downloading Face Model...";
-                faceLandmarker = await tasksVision.FaceLandmarker.createFromOptions(vision, {
+                log.innerText = "STATUS: Fetching Face Model...";
+                faceLandmarker = await visionLib.FaceLandmarker.createFromOptions(vision, {
                     baseOptions: {
                         modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
                         delegate: "GPU"
@@ -72,16 +76,16 @@ INTERFACE_CODE = """
                     numFaces: 1
                 });
 
-                log.innerText = "STATUS: Starting Webcam...";
+                log.innerText = "STATUS: Requesting Webcam...";
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
                 
                 video.onloadeddata = () => {
-                    log.innerText = "STATUS: AI Active - Privacy Encoded";
+                    log.innerText = "ONLINE: Privacy-Focused Scanner Active";
                     predict();
                 };
             } catch (err) {
-                log.innerText = "CRITICAL ERROR: " + err.message;
+                log.innerText = "CRITICAL: " + err.message;
                 log.style.color = "#FF4B4B";
             }
         }
@@ -89,7 +93,9 @@ INTERFACE_CODE = """
         async function predict() {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            const results = faceLandmarker.detectForVideo(video, performance.now());
+            
+            const startTimeMs = performance.now();
+            const results = faceLandmarker.detectForVideo(video, startTimeMs);
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (results.faceLandmarks && results.faceLandmarks.length > 0) {
@@ -103,6 +109,7 @@ INTERFACE_CODE = """
                 ctx.lineWidth = 3;
                 ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
                 
+                // Privacy: Encoded landmarks only
                 window.parent.postMessage({
                     type: "streamlit:setComponentValue",
                     value: JSON.stringify(landmarks)
@@ -111,7 +118,6 @@ INTERFACE_CODE = """
             window.requestAnimationFrame(predict);
         }
 
-        // Start when window is ready
         window.onload = init;
     </script>
 </body>
@@ -122,7 +128,7 @@ INTERFACE_CODE = """
 page = st.sidebar.radio("Navigate", ["Register", "Live Feed", "Log"])
 
 if page == "Register":
-    st.header("👤 Registration")
+    st.header("👤 Identity Registration")
     name = st.text_input("Name").upper()
     val = st.components.v1.html(INTERFACE_CODE, height=420)
     
@@ -130,7 +136,7 @@ if page == "Register":
         st.session_state.buffered_encoding = val
         st.success(f"✅ Recognition Ready for {name}")
     
-    if st.button("Save to Database"):
+    if st.button("Confirm Registration"):
         if name and st.session_state.get('buffered_encoding'):
             st.session_state.db[name] = json.loads(st.session_state.buffered_encoding)
             with open(DB_FILE, "w") as f:
@@ -138,7 +144,7 @@ if page == "Register":
             st.success(f"Saved {name}!")
             st.rerun()
         else:
-            st.error("Wait for face detection and enter a name.")
+            st.error("Ensure name is entered and face is detected.")
 
 elif page == "Live Feed":
     st.header("📹 Attendance Feed")
