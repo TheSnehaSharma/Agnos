@@ -44,16 +44,13 @@ if "component_key" not in st.session_state: st.session_state.component_key = str
 def load_org_data(org_key):
     paths = get_file_paths(org_key)
     
-    # 1. Load Faces
     if os.path.exists(paths["db"]):
         with open(paths["db"], "r") as f: st.session_state.db = json.load(f)
     else:
         st.session_state.db = {} 
     
-    # 2. Clear Previous Logs Memory
     st.session_state.logged_set = set() 
     
-    # 3. Load New Logs
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
             try:
@@ -71,13 +68,8 @@ def save_log(name, date_str, time_str):
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f: logs = pickle.load(f)
     
-    # Check duplicate entry for specific Date
     if not any(e['Name'] == name and e['Date'] == date_str for e in logs):
-        entry = {
-            "Name": name, 
-            "Time": time_str, 
-            "Date": date_str
-        }
+        entry = {"Name": name, "Time": time_str, "Date": date_str}
         logs.append(entry)
         with open(paths["logs"], "wb") as f: pickle.dump(logs, f)
         st.session_state.logged_set.add(name)
@@ -105,7 +97,6 @@ st.markdown("""
     .stDeployButton {display:none;}
     div[data-testid="stForm"] { border: 1px solid #333; padding: 20px; border-radius: 10px; }
     
-    /* Tabs Styling */
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] {
         height: 50px;
@@ -144,38 +135,65 @@ let currentMatch = "Unknown";
 let matchStartTime = 0;
 
 // --- GEOMETRIC MATH ---
-function magnitude(vec) {
-    let sum = 0; for (let val of vec) sum += val * val; return Math.sqrt(sum);
-}
-function dotProduct(vecA, vecB) {
-    let product = 0; for (let i = 0; i < vecA.length; i++) product += vecA[i] * vecB[i]; return product;
-}
-function cosineSimilarity(vecA, vecB) {
-    return dotProduct(vecA, vecB) / (magnitude(vecA) * magnitude(vecB));
+function getDist3D(p1, p2) {
+    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
+// 2. SCALAR GEOMETRY (ROTATION INVARIANT)
+// Instead of coordinates (which change when you tilt head),
+// We measure the DISTANCE between key points. 
+// Distance between nose and chin is the same even if you are upside down.
 function getFaceVector(landmarks) {
-    let cx = 0, cy = 0, cz = 0;
-    for(let p of landmarks) { cx+=p.x; cy+=p.y; cz+=p.z; }
-    cx/=landmarks.length; cy/=landmarks.length; cz/=landmarks.length;
+    const P = (idx) => landmarks[idx]; 
 
-    const indices = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
-    const vec = [];
-    for(let i of indices) {
-        vec.push(landmarks[i].x - cx); vec.push(landmarks[i].y - cy); vec.push(landmarks[i].z - cz);
+    // 1. Anchor: Inter-Pupillary Distance (distance between eyes)
+    // We divide all other distances by this to handle camera zoom.
+    const eyeDist = getDist3D(P(468), P(473));
+
+    // 2. Structural Measurements (The "Web")
+    const features = [
+        [1, 4],     // Nose bridge
+        [1, 61],    // Nose Tip -> Mouth Corner L
+        [1, 291],   // Nose Tip -> Mouth Corner R
+        [61, 291],  // Mouth Width
+        [33, 133],  // Eye Width L
+        [263, 362], // Eye Width R
+        [1, 152],   // Nose -> Chin
+        [10, 152],  // Forehead -> Chin (Face Height)
+        [234, 454], // Cheek -> Cheek (Face Width)
+        [1, 468],   // Nose -> L Iris
+        [1, 473],   // Nose -> R Iris
+        [152, 234], // Chin -> L Cheek
+        [152, 454], // Chin -> R Cheek
+        [10, 1]     // Forehead -> Nose
+    ];
+
+    // Return Array of Ratios
+    return features.map(pair => getDist3D(P(pair[0]), P(pair[1])) / eyeDist);
+}
+
+// Simple Manhattan Distance for Scalars
+function calculateScore(vecA, vecB) {
+    let diff = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        diff += Math.abs(vecA[i] - vecB[i]);
     }
-    return vec;
+    return diff;
 }
 
 function findMatch(landmarks) {
     const currentVec = getFaceVector(landmarks);
-    let bestMatch = { name: "Unknown", score: -1.0 };
+    let bestMatch = { name: "Unknown", score: 1000.0 }; // Lower score is better
+
     for (const [name, savedLandmarks] of Object.entries(registry)) {
         const savedVec = getFaceVector(savedLandmarks);
-        const sim = cosineSimilarity(currentVec, savedVec);
-        if (sim > bestMatch.score) bestMatch = { name: name, score: sim };
+        const score = calculateScore(currentVec, savedVec);
+        if (score < bestMatch.score) bestMatch = { name: name, score: score };
     }
-    if (bestMatch.score > 0.985) return bestMatch.name;
+    
+    // Threshold: Sum of ratio differences.
+    // 0.8 is usually a good tight threshold for this many features.
+    if (bestMatch.score < 0.65) return bestMatch.name;
     return "Unknown";
 }
 
@@ -224,7 +242,7 @@ async function predictVideo() {
             const landmarks = results.faceLandmarks[0];
             const name = findMatch(landmarks);
 
-            // --- STABILITY LOGIC ---
+            // --- STABILITY ---
             if (name !== currentMatch) {
                 currentMatch = name;
                 matchStartTime = now;
@@ -234,14 +252,13 @@ async function predictVideo() {
             const isUnknown = (currentMatch === "Unknown");
             const isVerified = (!isUnknown && timeElapsed > 1000); 
 
-            // --- TRIGGER PYTHON (Once Verified) ---
             if (isVerified) {
                 try {
                     const url = new URL(window.parent.location.href);
                     if (url.searchParams.get("detected_name") !== currentMatch) {
                         url.searchParams.set("detected_name", currentMatch);
                         
-                        // Set Client Time
+                        // Client Time
                         const d = new Date();
                         const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
                         const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
@@ -256,7 +273,7 @@ async function predictVideo() {
                 } catch(e) {}
             }
 
-            // --- DRAWING LOGIC ---
+            // --- DRAWING ---
             const xs = landmarks.map(p => p.x * canvas.width);
             const ys = landmarks.map(p => p.y * canvas.height);
             const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
@@ -274,16 +291,17 @@ async function predictVideo() {
                 }
             }
 
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 4;
-            ctx.strokeRect(x, y, w, h);
-            
-            ctx.fillStyle = color;
-            ctx.fillRect(x, y - 30, w, 30);
-            
-            ctx.fillStyle = "#000";
-            ctx.font = "bold 16px sans-serif";
-            ctx.fillText(label, x + 5, y - 8);
+            ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
+            ctx.fillStyle = color; ctx.fillRect(x, y - 30, w, 30);
+            ctx.fillStyle = "#000"; ctx.font = "bold 16px sans-serif"; ctx.fillText(label, x + 5, y - 8);
+
+            // Show "Web" for debug
+            ctx.strokeStyle = "rgba(0, 255, 255, 0.2)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(landmarks[468].x*canvas.width, landmarks[468].y*canvas.height);
+            ctx.lineTo(landmarks[473].x*canvas.width, landmarks[473].y*canvas.height); // Eye line
+            ctx.stroke();
         }
     }
     window.requestAnimationFrame(predictVideo);
@@ -331,7 +349,6 @@ if not st.session_state.auth_status:
         st.title("🔐 Agnos Login")
         st.markdown("Enter your Organization Key to proceed.")
         
-        # KEY INPUT
         key_in = st.text_input("Organization Key (5 Char)", max_chars=5, placeholder="e.g. ALPHA").upper()
         
         auth_db = load_auth()
@@ -386,47 +403,31 @@ else:
         st.metric("Logs Today", len(st.session_state.logged_set))
         st.markdown("---")
         
-        # --- HARD RESET LOGOUT ---
         if st.button("Log Out"):
-            # 1. Clear State
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            
-            # 2. Clear URL Params
+            for key in list(st.session_state.keys()): del st.session_state[key]
             st.query_params.clear()
-
-            # 3. Force Browser Reload
-            st.markdown("""
-                <meta http-equiv="refresh" content="0">
-                <script>parent.window.location.reload();</script>
-            """, unsafe_allow_html=True)
+            st.markdown("""<meta http-equiv="refresh" content="0"><script>parent.window.location.reload();</script>""", unsafe_allow_html=True)
             st.stop()
             
-        # --- DANGER ZONE ---
         with st.expander("⚠️ Danger Zone"):
             st.warning("This action cannot be undone.")
             if st.button("DELETE ORGANIZATION", type="primary"):
-                # 1. Delete Files
                 paths = get_file_paths(st.session_state.org_key)
                 if os.path.exists(paths['db']): os.remove(paths['db'])
                 if os.path.exists(paths['logs']): os.remove(paths['logs'])
                 
-                # 2. Remove from Registry
                 auth_db = load_auth()
                 if st.session_state.org_key in auth_db:
                     del auth_db[st.session_state.org_key]
                     save_auth(auth_db)
                 
-                # 3. Hard Logout
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
+                for key in list(st.session_state.keys()): del st.session_state[key]
                 st.query_params.clear()
                 st.markdown("""<meta http-equiv="refresh" content="0"><script>parent.window.location.reload();</script>""", unsafe_allow_html=True)
                 st.stop()
 
     st.title("Agnos Enterprise Biometrics")
     
-    # TABS NAVIGATION
     tab_scan, tab_reg, tab_logs, tab_db = st.tabs(["🎥 Scanner", "👤 Register", "📊 Logs", "🗄️ Database"])
 
     with tab_scan:
@@ -437,8 +438,6 @@ else:
             st.subheader("Live Feed")
             if "detected_name" in st.query_params:
                 det = st.query_params["detected_name"]
-                
-                # AUTO-CLEAR LOGIC (3 Seconds TTL)
                 ts = float(st.query_params.get("ts", 0))
                 if time.time() * 1000 - ts > 3000:
                     st.query_params.clear()
