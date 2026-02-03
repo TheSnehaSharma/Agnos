@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <html>
 <head>
+<style>
+    body { margin:0; background:black; overflow:hidden; font-family: monospace; }
+    #view { position:relative; width:100%; height:100vh; }
+    video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:contain; }
+    
+    /* DEBUG OVERLAY */
+    #status-log {
+        position: absolute; top: 10px; left: 10px; z-index: 20;
+        color: #00FF00; background: rgba(0,0,0,0.7); padding: 5px;
+        font-size: 12px; pointer-events: none;
+    }
+</style>
 <script type="module">
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
 
@@ -8,7 +20,8 @@ const video = document.getElementById("webcam");
 const staticImg = document.getElementById("static-img");
 const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
-const triggerBtn = document.getElementById("trigger-btn"); 
+const triggerBtn = document.getElementById("trigger-btn");
+const logger = document.getElementById("status-log");
 
 // INJECTED VARIABLES
 const staticImgSrc = "STATIC_IMG_PLACEHOLDER";
@@ -17,22 +30,23 @@ const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
 let lastVideoTime = -1;
-let lastProcessTime = -1;
-
-// --- STATE MACHINE ---
 let currentMatch = "Unknown";
 let matchStartTime = 0;
 let pendingLog = false;
 
-// --- GEOMETRIC MATH ---
+function log(msg) {
+    logger.innerText = "STATUS: " + msg;
+    console.log(msg);
+}
+
+// --- MATH HELPERS ---
 function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
-// 14-Point Structural Fingerprint (Rotation Invariant)
 function getFaceVector(landmarks) {
     const P = (idx) => landmarks[idx]; 
-    const eyeDist = getDist3D(P(468), P(473)); // Anchor
+    const eyeDist = getDist3D(P(468), P(473)); 
     const features = [
         [1, 4], [1, 61], [1, 291], [61, 291], [33, 133], [263, 362], 
         [1, 152], [10, 152], [234, 454], [1, 468], [1, 473], 
@@ -57,83 +71,93 @@ function findMatch(landmarks) {
         if (score < bestMatch.score) bestMatch = { name: name, score: score };
     }
     
-    // Threshold (0.65 is standard for this 14-point vector)
     if (bestMatch.score < 0.65) return bestMatch.name;
     return "Unknown";
 }
 
 async function init() {
-    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-            delegate: "GPU"
-        },
-        runningMode: runMode,
-        numFaces: 1,
-        minFaceDetectionConfidence: 0.5,
-        minFacePresenceConfidence: 0.5
-    });
+    log("Initializing Vision...");
+    try {
+        const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+        
+        log("Loading Model...");
+        faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                delegate: "GPU"
+            },
+            runningMode: runMode,
+            numFaces: 1
+        });
+        log("Model Loaded.");
 
-    if (staticImgSrc !== "null") {
-        staticImg.src = staticImgSrc;
-        staticImg.onload = async () => {
-            const results = await faceLandmarker.detect(staticImg);
-            if (results.faceLandmarks.length > 0) {
-                const dataStr = btoa(JSON.stringify(results.faceLandmarks[0]));
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set("face_data", dataStr);
-                window.parent.history.replaceState({}, "", url);
-                if(triggerBtn) triggerBtn.click(); 
+        if (staticImgSrc !== "null") {
+            // IMAGE MODE
+            staticImg.src = staticImgSrc;
+            staticImg.onload = async () => {
+                log("Processing Image...");
+                const results = await faceLandmarker.detect(staticImg);
+                if (results.faceLandmarks.length > 0) {
+                    const dataStr = btoa(JSON.stringify(results.faceLandmarks[0]));
+                    const url = new URL(window.parent.location.href);
+                    url.searchParams.set("face_data", dataStr);
+                    window.parent.history.replaceState({}, "", url);
+                    if(triggerBtn) triggerBtn.click();
+                    log("Image Processed.");
+                } else {
+                    log("No Face Found in Image.");
+                }
             }
+        } else {
+            // VIDEO MODE
+            log("Requesting Camera...");
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            video.addEventListener("loadeddata", () => {
+                log("Camera Active. Starting Loop...");
+                predictVideo();
+            });
         }
-    } else {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        video.srcObject = stream;
-        video.addEventListener("loadeddata", predictVideo);
+    } catch (err) {
+        log("ERROR: " + err.message);
     }
 }
 
 async function predictVideo() {
     const now = performance.now();
     
-    // SAFETY: Don't process if video hasn't advanced (Fixes MediaPipe Freeze)
+    // Resize canvas to match video (Fixes overlay alignment/disappearance)
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+    }
+
     if (video.currentTime !== lastVideoTime) {
         lastVideoTime = video.currentTime;
         
         try {
             const results = faceLandmarker.detectForVideo(video, now);
-            
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             if (results.faceLandmarks.length > 0) {
                 const landmarks = results.faceLandmarks[0];
                 const name = findMatch(landmarks);
 
-                // --- STATE MACHINE ---
-                
-                // 1. New Person Detected (or Unknown) -> Reset Timer
+                // --- LOGIC ---
                 if (name !== currentMatch) {
                     currentMatch = name;
                     matchStartTime = now;
-                    pendingLog = true; // Ready to log this new person
+                    pendingLog = true;
                 }
 
                 const timeElapsed = now - matchStartTime;
                 const isUnknown = (currentMatch === "Unknown");
-                
-                // 2. Verification Threshold (1.2 Seconds)
-                const isVerified = (!isUnknown && timeElapsed > 1200); 
+                const isVerified = (!isUnknown && timeElapsed > 1000); 
 
-                // 3. LOGGING TRIGGER
-                // We only log if: Verified AND we haven't logged them yet in this "glance"
+                // --- TRIGGER ---
                 if (isVerified && pendingLog) {
                     try {
                         const url = new URL(window.parent.location.href);
-                        
-                        // Set Name & Time
                         url.searchParams.set("detected_name", currentMatch);
                         
                         const d = new Date();
@@ -142,16 +166,17 @@ async function predictVideo() {
                         
                         url.searchParams.set("c_date", dateStr);
                         url.searchParams.set("c_time", timeStr);
-                        url.searchParams.set("ts", Date.now()); // Force change
+                        url.searchParams.set("ts", Date.now());
                         
                         window.parent.history.replaceState({}, "", url);
                         if(triggerBtn) triggerBtn.click();
                         
-                        pendingLog = false; // Mark as logged so we don't spam
+                        pendingLog = false;
+                        log("Logged: " + currentMatch);
                     } catch(e) { console.error(e); }
                 }
 
-                // --- VISUALS ---
+                // --- DRAW ---
                 const xs = landmarks.map(p => p.x * canvas.width);
                 const ys = landmarks.map(p => p.y * canvas.height);
                 const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
@@ -161,45 +186,39 @@ async function predictVideo() {
 
                 if (!isUnknown) {
                     if (isVerified) {
-                        color = "#00FF00"; // Green
-                        label = currentMatch;
+                        color = "#00FF00"; 
+                        label = currentMatch; 
                     } else {
-                        color = "#FFFF00"; // Yellow
-                        label = "VERIFYING...";
+                        color = "#FFFF00"; 
+                        label = "VERIFYING..."; 
                     }
                 }
 
                 ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
                 ctx.fillStyle = color; ctx.fillRect(x, y - 30, w, 30);
                 ctx.fillStyle = "#000"; ctx.font = "bold 16px sans-serif"; ctx.fillText(label, x + 5, y - 8);
-                
             } else {
-                // NO FACE FOUND -> FULL RESET
-                // This is crucial. If I walk away, the system must forget me.
-                currentMatch = "Unknown";
-                pendingLog = true;
+                // RESET IF FACE LOST
+                if (currentMatch !== "Unknown") {
+                    currentMatch = "Unknown";
+                    pendingLog = true;
+                    log("Face Lost. Resetting.");
+                }
             }
         } catch (e) {
-            console.error("MediaPipe Error:", e);
-            // If it crashes, wait 100ms and try again (Auto-Recovery)
-            await new Promise(r => setTimeout(r, 100));
+            console.log(e); // Silent fail to keep loop running
         }
     }
     
-    // Always request next frame
     window.requestAnimationFrame(predictVideo);
 }
 
 init();
 </script>
-<style>
-    body { margin:0; background:black; overflow:hidden; }
-    #view { position:relative; width:100%; height:100vh; }
-    video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:contain; }
-</style>
 </head>
 <body>
     <div id="view">
+        <div id="status-log">Initializing...</div>
         <video id="webcam" autoplay muted playsinline style="display: {'none' if img_b64 else 'block'}"></video>
         <img id="static-img" style="display: {'block' if img_b64 else 'none'}">
         <canvas id="overlay"></canvas>
