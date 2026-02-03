@@ -28,14 +28,14 @@ if "last_detected" not in st.session_state:
 # --- CSS ---
 CSS_CODE = """
 <style>
-body { margin:0; background:#0e1117; color:#00FF00; font-family: monospace; overflow:hidden; }
-#view { position:relative; width:100%; height:400px; border-radius:12px; overflow:hidden; background:#000; border:1px solid #333; }
+body { margin:0; background:#0e1117; color:#00FF00; font-family: sans-serif; overflow:hidden; }
+#view { position:relative; width:100%; height:450px; border-radius:12px; overflow:hidden; background:#000; border:1px solid #333; }
 video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; }
-#status-bar { position:absolute; top:0; left:0; right:0; background:rgba(0,0,0,0.8); padding:8px; font-size:11px; z-index:100; }
+#status-bar { position:absolute; top:0; left:0; right:0; background:rgba(0,0,0,0.8); padding:8px; font-size:11px; z-index:100; color:#fff;}
 </style>
 """
 
-# --- JS CODE: 3D Biometric Fingerprinting ---
+# --- JS CODE: 3D Biometric Fingerprinting + Time Persistence ---
 JS_CODE = """
 <script type="module">
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
@@ -51,8 +51,13 @@ const runMode = "RUN_MODE_PLACEHOLDER";
 const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
+let lastVideoTime = -1;
 
-// --- 3D Euclidean Distance ---
+// --- Persistence Variables ---
+let currentMatchName = "Unknown";
+let matchStartTime = 0;
+let isConfirmed = false;
+
 function getDist3D(p1, p2) {
     return Math.sqrt(
         Math.pow(p1.x - p2.x, 2) + 
@@ -61,7 +66,6 @@ function getDist3D(p1, p2) {
     );
 }
 
-// --- Generate Biometric Fingerprint ---
 function getFaceVector(landmarks) {
     const L_EYE = landmarks[468]; 
     const R_EYE = landmarks[473]; 
@@ -82,7 +86,6 @@ function getFaceVector(landmarks) {
     ];
 }
 
-// --- Weighted Similarity Search ---
 function findMatch(currentLandmarks) {
     const currentVec = getFaceVector(currentLandmarks);
     let bestMatch = { name: "Unknown", error: 100 };
@@ -106,14 +109,12 @@ function findMatch(currentLandmarks) {
     }
 
     if (bestMatch.error < 0.08) {
-        const confidence = Math.max(0, Math.floor((1 - (bestMatch.error / 0.1)) * 100));
-        return { name: bestMatch.name, conf: confidence }; 
+        return { name: bestMatch.name }; 
     } else {
-        return { name: "Unknown", conf: 0 };
+        return { name: "Unknown" };
     }
 }
 
-// --- Init MediaPipe ---
 async function init() {
     try {
         const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
@@ -147,7 +148,8 @@ async function init() {
 }
 
 async function predictVideo() {
-    const results = faceLandmarker.detectForVideo(video, performance.now());
+    const now = performance.now();
+    const results = faceLandmarker.detectForVideo(video, now);
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -155,23 +157,66 @@ async function predictVideo() {
         const landmarks = results.faceLandmarks[0];
         const match = findMatch(landmarks);
 
+        // --- TIME PERSISTENCE LOGIC ---
+        // 1. If we detect a new person (or Unknown), reset timer
+        if (match.name !== currentMatchName) {
+            currentMatchName = match.name;
+            matchStartTime = now;
+            isConfirmed = false;
+        }
+
+        // 2. If the same person is detected
+        if (currentMatchName !== "Unknown") {
+            const duration = now - matchStartTime;
+            
+            // 3. Check if 1 second (1000ms) has passed
+            if (duration > 1000) {
+                isConfirmed = true;
+            }
+        } else {
+            isConfirmed = false; // "Unknown" is never confirmed
+        }
+
+        // --- DRAWING ---
         const xs = landmarks.map(p => p.x * canvas.width);
         const ys = landmarks.map(p => p.y * canvas.height);
         const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs) - x, h = Math.max(...ys) - y;
 
-        const color = match.name === "Unknown" ? "#FF4B4B" : "#00FF00";
-        ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
-        ctx.fillStyle = color; ctx.fillRect(x, y - 25, w, 25);
-        ctx.fillStyle = "white"; ctx.font = "bold 14px monospace";
-        ctx.fillText(`${match.name}`, x + 5, y - 8);
-
-        if (match.name !== "Unknown") {
-            const url = new URL(window.parent.location.href);
-            if (url.searchParams.get("detected") !== match.name) {
-                url.searchParams.set("detected", match.name);
-                window.parent.history.replaceState({}, "", url);
+        // Color Logic: Green = Confirmed, Orange = Waiting, Red = Unknown
+        let boxColor = "#FF4B4B"; // Red
+        let displayText = "Unknown";
+        
+        if (currentMatchName !== "Unknown") {
+            if (isConfirmed) {
+                boxColor = "#00FF00"; // Green
+                displayText = currentMatchName;
+            } else {
+                boxColor = "#FFA500"; // Orange
+                const timeLeft = Math.ceil((1000 - (now - matchStartTime))/100);
+                displayText = `Verifying... ${timeLeft}`;
             }
         }
+
+        ctx.strokeStyle = boxColor; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
+        ctx.fillStyle = boxColor; ctx.fillRect(x, y - 30, w, 30);
+        ctx.fillStyle = "black"; ctx.font = "bold 16px sans-serif";
+        ctx.fillText(displayText, x + 5, y - 10);
+
+        // --- SEND TO PYTHON ---
+        // Only trigger update if CONFIRMED and it's a new detection for the session
+        if (isConfirmed && currentMatchName !== "Unknown") {
+            const url = new URL(window.parent.location.href);
+            if (url.searchParams.get("detected") !== currentMatchName) {
+                url.searchParams.set("detected", currentMatchName);
+                window.parent.history.replaceState({}, "", url);
+                // Force Python rerun
+                window.parent.postMessage({ type: 'streamlit:setComponentValue', value: currentMatchName }, "*");
+            }
+        }
+    } else {
+        // No face detected -> Reset
+        currentMatchName = "Unknown";
+        isConfirmed = false;
     }
     window.requestAnimationFrame(predictVideo);
 }
@@ -202,39 +247,47 @@ def save_attendance_pkl(name):
     logs.append(entry)
     with open(PKL_LOG,"wb") as f: pickle.dump(logs, f)
 
-# --- NEW UI LAYOUT ---
+# --- UI LAYOUT ---
 
-# 1. Sidebar: Admin & Status (Website Navigation feel)
+# 1. SIDEBAR: STATS & TOOLS
 with st.sidebar:
     st.title("🛡️ Agnos Admin")
     st.markdown("---")
     
-    # Status Metrics
-    st.metric("Users Registered", len(st.session_state.db))
-    if st.session_state.last_detected:
-        st.info(f"Last Log: {st.session_state.last_detected}")
+    # Calculate Stats
+    total_logs = 0
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG,"rb") as f: 
+            total_logs = len(pickle.load(f))
+            
+    # Display Stats
+    st.markdown("### 📈 Live Stats")
+    c1, c2 = st.columns(2)
+    with c1: st.metric("Registered", len(st.session_state.db))
+    with c2: st.metric("Present (Session)", len(st.session_state.logged_set))
+    st.metric("Total Logs", total_logs)
     
     st.markdown("---")
-    st.markdown("### ⚙️ Database Tools")
     
-    # Database Management moved to Sidebar for cleaner main UI
+    if st.button("🔄 Refresh System", use_container_width=True):
+        st.rerun()
+
+    st.markdown("### ⚙️ Database")
     if len(st.session_state.db) > 0:
-        manage_expander = st.expander("Remove Users", expanded=False)
+        manage_expander = st.expander("Manage Users", expanded=False)
         with manage_expander:
             for reg_name in list(st.session_state.db.keys()):
-                c1, c2 = st.columns([3,1])
-                c1.text(reg_name)
-                if c2.button("❌", key=f"del_{reg_name}"):
+                c_name, c_del = st.columns([3,1])
+                c_name.text(reg_name)
+                if c_del.button("❌", key=f"del_{reg_name}"):
                     del st.session_state.db[reg_name]
                     with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
                     st.rerun()
     else:
         st.caption("Database is empty.")
 
-# 2. Main Area: Tabs (App feel)
+# 2. MAIN TABS
 st.title("Agnos Biometric System")
-
-# Creating the Tab Layout
 tab_live, tab_reg, tab_log = st.tabs(["🎥 Live Scanner", "👤 New Registration", "📊 Attendance Logs"])
 
 # --- TAB 1: LIVE SCANNER ---
@@ -243,69 +296,66 @@ with tab_live:
     detected_name = st.query_params.get("detected")
 
     with col_v:
-        # The Video Component
-        st.components.v1.html(get_component_html(), height=450)
+        st.components.v1.html(get_component_html(), height=460)
 
     with col_m:
         st.markdown("### Status")
         if detected_name and detected_name != "Unknown":
-            st.success(f"**MATCH FOUND**")
-            st.title(f"✅ {detected_name}")
+            st.success(f"**Match Confirmed**")
+            st.markdown(f"### {detected_name}") 
             
             if detected_name not in st.session_state.logged_set:
                 save_attendance_pkl(detected_name)
                 st.session_state.logged_set.add(detected_name)
-                st.toast(f"Attendance marked for {detected_name}")
+                st.toast(f"Marked: {detected_name}")
             
             st.session_state.last_detected = detected_name
+            st.caption(f"Time: {datetime.now().strftime('%H:%M:%S')}")
         else:
-            st.warning("🔍 Scanning...")
-            st.markdown("*Please face the camera directly.*")
+            st.info("Searching...")
+            st.caption("Please look directly at the camera.")
 
 # --- TAB 2: REGISTRATION ---
 with tab_reg:
     st.subheader("Enroll New Personnel")
     
-    c1, c2 = st.columns(2)
-    with c1:
+    # 2:1 Column Ratio
+    c_input, c_preview = st.columns([2, 1])
+    
+    with c_input:
         name = st.text_input("Full Name").upper()
         uploaded = st.file_uploader("Upload Profile Image (Clear frontal face)", type=['jpg','jpeg','png'])
+        st.info("Upload a photo to begin biometric extraction.")
     
-    with c2:
+    with c_preview:
         if uploaded:
-            st.image(uploaded, caption="Preview", width=200)
-    
-    # Process Logic
-    if uploaded and name:
-        st.divider()
-        st.markdown("### Biometric Processing")
-        b64 = base64.b64encode(uploaded.getvalue()).decode()
-        
-        # Render the component hidden to process landmarks
-        st.components.v1.html(get_component_html(b64), height=200)
-
-        url_data = st.query_params.get("face_data")
-        
-        if url_data:
-            st.success("Face Landmarks Extracted Successfully!")
-            if st.button("💾 Save to Database", type="primary"):
-                st.session_state.db[name] = json.loads(base64.b64decode(url_data).decode())
-                with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
-                st.query_params.clear()
-                st.balloons()
-                st.rerun()
+            st.image(uploaded, caption="Preview", use_container_width=True)
+            # Hidden processing component
+            b64 = base64.b64encode(uploaded.getvalue()).decode()
+            st.components.v1.html(get_component_html(b64), height=0, width=0)
+            
+            # Logic & Save Button below preview
+            url_data = st.query_params.get("face_data")
+            if url_data and name:
+                if st.button("💾 Save to Database", type="primary", use_container_width=True):
+                    st.session_state.db[name] = json.loads(base64.b64decode(url_data).decode())
+                    with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
+                    st.query_params.clear()
+                    st.balloons()
+                    st.rerun()
+            elif not url_data:
+                st.caption("⏳ Extracting features...")
         else:
-            st.info("Analyzing image... Please wait a moment.")
+            st.markdown("""
+            <div style="height:150px; border:1px dashed #444; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#666;">
+                No Image
+            </div>
+            """, unsafe_allow_html=True)
 
 # --- TAB 3: LOGS ---
 with tab_log:
-    c_head, c_btn = st.columns([4,1])
-    with c_head:
-        st.subheader("Access History")
-    with c_btn:
-        if st.button("Refresh Logs"):
-            st.rerun()
-
+    st.subheader("Access History")
+    
     if os.path.exists(PKL_LOG):
         with open(PKL_LOG,"rb") as f: logs = pickle.load(f)
         df = pd.DataFrame(logs)
@@ -313,13 +363,12 @@ with tab_log:
         if not df.empty:
             st.dataframe(df, use_container_width=True)
             
-            # Download and Clear options
             c1, c2 = st.columns(2)
             with c1:
                 csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Download CSV", csv, "attendance_log.csv", "text/csv")
+                st.download_button("📥 Download CSV", csv, "attendance_log.csv", "text/csv", use_container_width=True)
             with c2:
-                if st.button("🗑️ Clear All Logs"):
+                if st.button("🗑️ Clear All Logs", use_container_width=True):
                     os.remove(PKL_LOG)
                     st.session_state.logged_set = set()
                     st.rerun()
