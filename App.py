@@ -29,7 +29,7 @@ def save_auth(data):
 def get_file_paths(org_key):
     return {
         "db": os.path.join(DATA_DIR, f"faces_{org_key}.json"),
-        "logs": os.path.join(DATA_DIR, f"logs_{org_key}.pkl")
+        "logs": os.path.join(DATA_DIR, f"logs_{org_key}.csv") # CHANGED TO CSV
     }
 
 # --- SESSION STATE ---
@@ -39,7 +39,6 @@ if "db" not in st.session_state: st.session_state.db = {}
 if "logged_set" not in st.session_state: st.session_state.logged_set = set()
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 if "component_key" not in st.session_state: st.session_state.component_key = str(uuid.uuid4())
-if "last_logged_user" not in st.session_state: st.session_state.last_logged_user = None
 
 # --- BACKEND LOGIC ---
 def load_org_data(org_key):
@@ -51,43 +50,46 @@ def load_org_data(org_key):
     else:
         st.session_state.db = {} 
     
-    # 2. Clear Memory
+    # 2. Fast-Load Today's Logs into Memory
     st.session_state.logged_set = set() 
-    
-    # 3. Load Logs
     if os.path.exists(paths["logs"]):
-        with open(paths["logs"], "rb") as f:
-            try:
-                logs = pickle.load(f)
-                for entry in logs:
-                    st.session_state.logged_set.add(entry["Name"])
-            except Exception:
-                pass 
+        try:
+            # We use Pandas to quickly grab just today's names
+            df = pd.read_csv(paths["logs"])
+            today = datetime.now().strftime("%Y-%m-%d")
+            # Filter for today and convert to set
+            todays_names = df[df['Date'] == today]['Name'].unique()
+            st.session_state.logged_set = set(todays_names)
+        except Exception:
+            pass # File might be empty or corrupt, ignore
 
 def save_log(name, date_str, time_str):
     if not st.session_state.auth_status: return False
     
+    # 1. In-Memory Check (Instant)
+    # If we already have them in RAM, skip disk I/O entirely
+    if name in st.session_state.logged_set:
+        return False
+
     paths = get_file_paths(st.session_state.org_key)
-    logs = []
-    if os.path.exists(paths["logs"]):
-        with open(paths["logs"], "rb") as f: logs = pickle.load(f)
+    csv_path = paths["logs"]
     
-    # Check if this person has been logged ON THIS DATE
-    already_logged = any(e['Name'] == name and e['Date'] == date_str for e in logs)
-    
-    if not already_logged:
-        entry = {
-            "Name": name, 
-            "Time": time_str, 
-            "Date": date_str
-        }
-        logs.append(entry)
-        with open(paths["logs"], "wb") as f: pickle.dump(logs, f)
+    # 2. Append-Only Write (Instant)
+    # This is O(1) complexity - extremely fast
+    try:
+        # Check if file exists to write header
+        write_header = not os.path.exists(csv_path)
         
+        with open(csv_path, "a") as f:
+            if write_header:
+                f.write("Name,Time,Date\n")
+            f.write(f"{name},{time_str},{date_str}\n")
+            
+        # 3. Update Memory
         st.session_state.logged_set.add(name)
-        st.session_state.last_logged_user = name
         return True
-    return False
+    except:
+        return False
 
 # --- AUTO-LOGGING TRIGGER ---
 qp = st.query_params
@@ -98,7 +100,7 @@ if "detected_name" in qp:
 
     if st.session_state.auth_status and det_name and det_name != "Unknown":
         if save_log(det_name, c_date, c_time):
-            st.toast(f"✅ Verified: {det_name}", icon="🔐")
+            st.toast(f"✅ Verified: {det_name}", icon="⚡")
 
 # --- CSS STYLING ---
 st.markdown("""
@@ -147,59 +149,52 @@ let lastVideoTime = -1;
 let currentMatch = "Unknown";
 let matchStartTime = 0;
 
-// --- 3D MATH (Requested Logic) ---
+// --- GEOMETRIC MATH ---
 function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
-function getFaceVector(landmarks) {
-    const L_EYE = landmarks[468]; const R_EYE = landmarks[473]; 
-    const NOSE  = landmarks[4];   const CHIN  = landmarks[152]; 
-    const L_EAR = landmarks[234]; const R_EAR = landmarks[454]; 
-    
-    // Anchor: Eye Distance (in 3D space)
-    const eyeDist = getDist3D(L_EYE, R_EYE);
-
-    return [
-        getDist3D(NOSE, L_EYE) / eyeDist,  // Nose-LeftEye
-        getDist3D(NOSE, R_EYE) / eyeDist,  // Nose-RightEye
-        getDist3D(NOSE, CHIN)  / eyeDist,  // Nose-Chin
-        getDist3D(L_EAR, R_EAR)/ eyeDist,  // Face Width
-        getDist3D(L_EYE, CHIN) / eyeDist,  // LeftEye-Chin
-        getDist3D(R_EYE, CHIN) / eyeDist   // RightEye-Chin
-    ];
+// Check if head is looking straight (Pose Guard)
+function isFaceFrontal(landmarks) {
+    const nose = landmarks[1];
+    const leftEar = landmarks[234];
+    const rightEar = landmarks[454];
+    const distL = getDist3D(nose, leftEar);
+    const distR = getDist3D(nose, rightEar);
+    const ratio = Math.min(distL, distR) / Math.max(distL, distR);
+    if (ratio < 0.5) return false;
+    return true;
 }
 
-function findMatch(currentLandmarks) {
-    const currentVec = getFaceVector(currentLandmarks);
-    let bestMatch = { name: "Unknown", error: 100 };
-    
-    // Weights prioritize the Nose/Eye triangle (Rigid Bone) over the Chin (Moves when talking)
-    const weights = [2.0, 2.0, 1.0, 1.5, 1.0, 1.0]; 
+function getFaceVector(landmarks) {
+    const P = (idx) => landmarks[idx]; 
+    const eyeDist = getDist3D(P(468), P(473));
+    const features = [
+        [1, 4], [1, 61], [1, 291], [61, 291], [33, 133], [263, 362], 
+        [1, 152], [10, 152], [234, 454], [1, 468], [1, 473], 
+        [152, 234], [152, 454], [10, 1]
+    ];
+    return features.map(pair => getDist3D(P(pair[0]), P(pair[1])) / eyeDist);
+}
+
+function calculateScore(vecA, vecB) {
+    let diff = 0;
+    for (let i = 0; i < vecA.length; i++) diff += Math.abs(vecA[i] - vecB[i]);
+    return diff;
+}
+
+function findMatch(landmarks) {
+    const currentVec = getFaceVector(landmarks);
+    let bestMatch = { name: "Unknown", score: 1000.0 }; 
 
     for (const [name, savedLandmarks] of Object.entries(registry)) {
         const savedVec = getFaceVector(savedLandmarks);
-        let weightedError = 0;
-        let totalWeight = 0;
-
-        for(let i=0; i<currentVec.length; i++) {
-            const diff = Math.abs(currentVec[i] - savedVec[i]);
-            weightedError += diff * weights[i];
-            totalWeight += weights[i];
-        }
-
-        const avgError = weightedError / totalWeight;
-        if (avgError < bestMatch.error) {
-            bestMatch = { name: name, error: avgError };
-        }
+        const score = calculateScore(currentVec, savedVec);
+        if (score < bestMatch.score) bestMatch = { name: name, score: score };
     }
-
-    // Threshold: 0.08 is the sweet spot for this weighted error
-    if (bestMatch.error < 0.08) {
-        return { name: bestMatch.name }; 
-    } else {
-        return { name: "Unknown" };
-    }
+    
+    if (bestMatch.score < 0.65) return bestMatch.name;
+    return "Unknown";
 }
 
 async function init() {
@@ -245,67 +240,66 @@ async function predictVideo() {
 
         if (results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
-            const match = findMatch(landmarks);
-            const name = match.name;
-
-            // --- STABILITY & PERSISTENCE ---
-            if (name !== currentMatch) {
-                currentMatch = name;
-                matchStartTime = now;
-            }
-
-            const timeElapsed = now - matchStartTime;
-            const isUnknown = (currentMatch === "Unknown");
-            const isVerified = (!isUnknown && timeElapsed > 1000); // 1.0s Confirmation
-
-            // --- TRIGGER PYTHON (Without freezing) ---
-            if (isVerified) {
-                try {
-                    const url = new URL(window.parent.location.href);
-                    // Only update if not already set to avoid loop
-                    if (url.searchParams.get("detected_name") !== currentMatch) {
-                        url.searchParams.set("detected_name", currentMatch);
-                        
-                        // Capture Client Time
-                        const d = new Date();
-                        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
-                        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
-                        
-                        url.searchParams.set("c_date", dateStr);
-                        url.searchParams.set("c_time", timeStr);
-                        url.searchParams.set("ts", Date.now()); 
-                        
-                        window.parent.history.replaceState({}, "", url);
-                        if(triggerBtn) triggerBtn.click();
-                    }
-                } catch(e) {}
-            }
-
-            // --- AUTO-RESET STATUS ---
-            // If the user leaves, reset the status in UI immediately
-            // (Note: Python state clears on 'ts' timeout, visual clears here)
             
-            // --- DRAWING ---
-            const xs = landmarks.map(p => p.x * canvas.width);
-            const ys = landmarks.map(p => p.y * canvas.height);
-            const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
+            // 1. POSE CHECK
+            const isFrontal = isFaceFrontal(landmarks);
             
-            let color = "#FF0000"; 
+            let name = "Unknown";
+            let color = "#FF0000"; // Red
             let label = "UNKNOWN";
 
-            if (!isUnknown) {
-                if (isVerified) {
-                    color = "#00FF00"; 
-                    label = currentMatch; 
-                } else {
-                    color = "#FFFF00"; 
-                    label = "VERIFYING..."; 
+            if (!isFrontal) {
+                name = "Unknown";
+                label = "LOOK STRAIGHT";
+                color = "#FF4B4B";
+            } else {
+                name = findMatch(landmarks);
+                
+                if (name !== currentMatch) {
+                    currentMatch = name;
+                    matchStartTime = now;
+                }
+
+                const timeElapsed = now - matchStartTime;
+                const isUnknown = (currentMatch === "Unknown");
+                const isVerified = (!isUnknown && timeElapsed > 1000); 
+
+                if (!isUnknown) {
+                    if (isVerified) {
+                        color = "#00FF00"; // Green
+                        label = currentMatch; 
+                        
+                        try {
+                            const url = new URL(window.parent.location.href);
+                            if (url.searchParams.get("detected_name") !== currentMatch) {
+                                url.searchParams.set("detected_name", currentMatch);
+                                const d = new Date();
+                                const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
+                                const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
+                                
+                                url.searchParams.set("c_date", dateStr);
+                                url.searchParams.set("c_time", timeStr);
+                                url.searchParams.set("ts", Date.now()); 
+                                
+                                window.parent.history.replaceState({}, "", url);
+                                if(triggerBtn) triggerBtn.click();
+                            }
+                        } catch(e) {}
+                        
+                    } else {
+                        color = "#FFFF00"; // Yellow
+                        label = "VERIFYING..."; 
+                    }
                 }
             }
 
             ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
             ctx.fillStyle = color; ctx.fillRect(x, y - 30, w, 30);
             ctx.fillStyle = "#000"; ctx.font = "bold 16px sans-serif"; ctx.fillText(label, x + 5, y - 8);
+            
+            const xs = landmarks.map(p => p.x * canvas.width);
+            const ys = landmarks.map(p => p.y * canvas.height);
+            const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
         }
     }
     window.requestAnimationFrame(predictVideo);
@@ -500,11 +494,12 @@ else:
                 st.rerun()
         
         if os.path.exists(paths["logs"]):
-            with open(paths["logs"],"rb") as f: df = pd.DataFrame(pickle.load(f))
-            if not df.empty:
+            try:
+                df = pd.read_csv(paths["logs"])
                 st.dataframe(df, use_container_width=True)
                 st.download_button("Download CSV", df.to_csv(index=False), f"logs_{st.session_state.org_key}.csv", "text/csv")
-            else: st.info("No logs found.")
+            except:
+                st.info("Log file is empty or corrupted.")
         else: st.info("No logs found.")
         
     with tab_db:
