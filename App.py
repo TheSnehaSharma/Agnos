@@ -200,4 +200,130 @@ def save_attendance_pkl(name):
         with open(PKL_LOG,"rb") as f: logs = pickle.load(f)
     entry = {"Name":name, "Time":datetime.now().strftime("%H:%M:%S"), "Date":datetime.now().strftime("%Y-%m-%d")}
     logs.append(entry)
-    with open(PKL_LOG,"wb") as
+    with open(PKL_LOG,"wb") as f: pickle.dump(logs, f)
+
+# --- NEW UI LAYOUT ---
+
+# 1. Sidebar: Admin & Status (Website Navigation feel)
+with st.sidebar:
+    st.title("🛡️ Agnos Admin")
+    st.markdown("---")
+    
+    # Status Metrics
+    st.metric("Users Registered", len(st.session_state.db))
+    if st.session_state.last_detected:
+        st.info(f"Last Log: {st.session_state.last_detected}")
+    
+    st.markdown("---")
+    st.markdown("### ⚙️ Database Tools")
+    
+    # Database Management moved to Sidebar for cleaner main UI
+    if len(st.session_state.db) > 0:
+        manage_expander = st.expander("Remove Users", expanded=False)
+        with manage_expander:
+            for reg_name in list(st.session_state.db.keys()):
+                c1, c2 = st.columns([3,1])
+                c1.text(reg_name)
+                if c2.button("❌", key=f"del_{reg_name}"):
+                    del st.session_state.db[reg_name]
+                    with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
+                    st.rerun()
+    else:
+        st.caption("Database is empty.")
+
+# 2. Main Area: Tabs (App feel)
+st.title("Agnos Biometric System")
+
+# Creating the Tab Layout
+tab_live, tab_reg, tab_log = st.tabs(["🎥 Live Scanner", "👤 New Registration", "📊 Attendance Logs"])
+
+# --- TAB 1: LIVE SCANNER ---
+with tab_live:
+    col_v, col_m = st.columns([3,1])
+    detected_name = st.query_params.get("detected")
+
+    with col_v:
+        # The Video Component
+        st.components.v1.html(get_component_html(), height=450)
+
+    with col_m:
+        st.markdown("### Status")
+        if detected_name and detected_name != "Unknown":
+            st.success(f"**MATCH FOUND**")
+            st.title(f"✅ {detected_name}")
+            
+            if detected_name not in st.session_state.logged_set:
+                save_attendance_pkl(detected_name)
+                st.session_state.logged_set.add(detected_name)
+                st.toast(f"Attendance marked for {detected_name}")
+            
+            st.session_state.last_detected = detected_name
+        else:
+            st.warning("🔍 Scanning...")
+            st.markdown("*Please face the camera directly.*")
+
+# --- TAB 2: REGISTRATION ---
+with tab_reg:
+    st.subheader("Enroll New Personnel")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        name = st.text_input("Full Name").upper()
+        uploaded = st.file_uploader("Upload Profile Image (Clear frontal face)", type=['jpg','jpeg','png'])
+    
+    with c2:
+        if uploaded:
+            st.image(uploaded, caption="Preview", width=200)
+    
+    # Process Logic
+    if uploaded and name:
+        st.divider()
+        st.markdown("### Biometric Processing")
+        b64 = base64.b64encode(uploaded.getvalue()).decode()
+        
+        # Render the component hidden to process landmarks
+        st.components.v1.html(get_component_html(b64), height=200)
+
+        url_data = st.query_params.get("face_data")
+        
+        if url_data:
+            st.success("Face Landmarks Extracted Successfully!")
+            if st.button("💾 Save to Database", type="primary"):
+                st.session_state.db[name] = json.loads(base64.b64decode(url_data).decode())
+                with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
+                st.query_params.clear()
+                st.balloons()
+                st.rerun()
+        else:
+            st.info("Analyzing image... Please wait a moment.")
+
+# --- TAB 3: LOGS ---
+with tab_log:
+    c_head, c_btn = st.columns([4,1])
+    with c_head:
+        st.subheader("Access History")
+    with c_btn:
+        if st.button("Refresh Logs"):
+            st.rerun()
+
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG,"rb") as f: logs = pickle.load(f)
+        df = pd.DataFrame(logs)
+        
+        if not df.empty:
+            st.dataframe(df, use_container_width=True)
+            
+            # Download and Clear options
+            c1, c2 = st.columns(2)
+            with c1:
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download CSV", csv, "attendance_log.csv", "text/csv")
+            with c2:
+                if st.button("🗑️ Clear All Logs"):
+                    os.remove(PKL_LOG)
+                    st.session_state.logged_set = set()
+                    st.rerun()
+        else:
+            st.info("Log file is empty.")
+    else:
+        st.info("No logs found yet.")
