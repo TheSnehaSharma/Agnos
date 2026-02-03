@@ -10,7 +10,7 @@ from datetime import datetime
 DB_FILE = "registered_faces.json"
 PKL_LOG = "attendance_data.pkl"
 
-st.set_page_config(page_title="Normalized-Cosine Auth", layout="wide")
+st.set_page_config(page_title="Agnos", layout="wide")
 
 # --- SESSION STATE ---
 if "db" not in st.session_state:
@@ -35,7 +35,6 @@ video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; 
 </style>
 """
 
-# --- JS CODE with normalization and cosine similarity ---
 # --- JS CODE with Ratio-Based Biometrics ---
 JS_CODE = """
 <script type="module">
@@ -52,14 +51,10 @@ const runMode = "RUN_MODE_PLACEHOLDER";
 const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
-
-// --- Helper: Euclidean Distance between two landmarks ---
 function getDist(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
 }
 
-// --- CORE LOGIC: Extract Invariant Ratios ---
-// We use landmarks: 468(L-Iris), 473(R-Iris), 1(NoseTip), 61(MouthL), 291(MouthR), 152(Chin), 234(L-Cheek), 454(R-Cheek)
 function getFaceRatios(landmarks) {
     const leftIris = landmarks[468];
     const rightIris = landmarks[473];
@@ -70,14 +65,10 @@ function getFaceRatios(landmarks) {
     const leftCheek = landmarks[234];
     const rightCheek = landmarks[454];
 
-    // 1. The Anchor: Inter-Pupillary Distance (IPD)
-    // All other measurements are divided by this to make them scale-invariant.
     const ipd = getDist(leftIris, rightIris);
 
-    // Midpoint between eyes (for vertical measurements)
     const midEye = { x: (leftIris.x + rightIris.x)/2, y: (leftIris.y + rightIris.y)/2 };
 
-    // 2. Calculate Ratios
     const ratioVector = [
         getDist(noseTip, midEye) / ipd,      // Nose Length
         getDist(mouthLeft, mouthRight) / ipd,// Mouth Width
@@ -89,8 +80,6 @@ function getFaceRatios(landmarks) {
     return ratioVector;
 }
 
-// --- Compare Vectors (Manhattan Distance) ---
-// Returns a "Difference Score". Lower is better. 0.0 is exact match.
 function calculateDifference(vecA, vecB) {
     let diff = 0;
     for (let i = 0; i < vecA.length; i++) {
@@ -99,7 +88,6 @@ function calculateDifference(vecA, vecB) {
     return diff;
 }
 
-// --- Match face ---
 function findMatch(currentLandmarks) {
     const currentVec = getFaceRatios(currentLandmarks);
     let bestMatch = { name: "Unknown", score: 100 }; // High score = bad match
@@ -115,18 +103,16 @@ function findMatch(currentLandmarks) {
     }
 
     // --- THRESHOLD ---
-    // A difference of < 0.25 is usually the sweet spot for these specific ratios.
     // 0.0 = Identical
     // 0.15 = Very close
     // 0.3+ = Different person
-    if (bestMatch.score < 0.25) {
+    if (bestMatch.score < 0.3) {
         return { name: bestMatch.name, conf: Math.floor((1 - bestMatch.score) * 100) }; 
     } else {
         return { name: "Unknown", conf: 0 };
     }
 }
 
-// --- Init MediaPipe ---
 async function init() {
     try {
         const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
@@ -159,7 +145,6 @@ async function init() {
     } catch (err) { log.innerText = "ERROR: " + err.message; }
 }
 
-// --- Predict video frames ---
 async function predictVideo() {
     const results = faceLandmarker.detectForVideo(video, performance.now());
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
@@ -169,7 +154,6 @@ async function predictVideo() {
         const landmarks = results.faceLandmarks[0];
         const match = findMatch(landmarks);
 
-        // Draw Bounding Box
         const xs = landmarks.map(p => p.x * canvas.width);
         const ys = landmarks.map(p => p.y * canvas.height);
         const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs) - x, h = Math.max(...ys) - y;
@@ -179,7 +163,6 @@ async function predictVideo() {
         ctx.fillStyle = color; ctx.fillRect(x, y - 25, w, 25);
         ctx.fillStyle = "white"; ctx.font = "bold 14px monospace";
         
-        // Show Name and "Error Score" (lower is better, but we show confidence)
         ctx.fillText(`${match.name}`, x + 5, y - 8);
 
         if (match.name !== "Unknown") {
