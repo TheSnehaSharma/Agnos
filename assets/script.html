@@ -19,6 +19,7 @@ let faceLandmarker;
 let lastVideoTime = -1;
 let currentMatch = "Unknown";
 let matchStartTime = 0;
+let debounceTimer = null; // HOLDS THE STATE
 
 function log(msg) {
     if(logger) logger.innerText = "SYSTEM: " + msg;
@@ -108,40 +109,55 @@ async function init() {
     }
 }
 
-// --- STATE MANAGEMENT ---
+// --- STICKY STATE MANAGEMENT ---
 function manageState(name) {
     const url = new URL(window.parent.location.href);
     const urlName = url.searchParams.get("detected_name");
 
-    // 1. Stable State: If we see what the URL says, do nothing.
-    if (name === urlName) return;
+    // 1. If what we see matches URL, we are stable. Clear any pending reset.
+    if (name === urlName) {
+        if (debounceTimer) {
+            clearTimeout(debounceTimer);
+            debounceTimer = null;
+        }
+        return;
+    }
 
-    // 2. Change State
-    if (name === "Unknown") {
-        // Soft clear (no reload needed)
-        url.searchParams.delete("detected_name");
-        url.searchParams.delete("c_date");
-        url.searchParams.delete("c_time");
-        window.parent.history.replaceState({}, "", url);
-    } else {
-        // New Person -> Hard Reload to Trigger Python
-        url.searchParams.set("detected_name", name);
+    // 2. If we see a NEW person (not Unknown), update IMMEDIATELY.
+    if (name !== "Unknown") {
+        if (debounceTimer) clearTimeout(debounceTimer);
         
+        // Prepare URL
+        url.searchParams.set("detected_name", name);
         const d = new Date();
         const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
         const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
-        
         url.searchParams.set("c_date", dateStr);
         url.searchParams.set("c_time", timeStr);
         
+        // Force Reload
         window.parent.location.href = url.toString();
+        return;
+    }
+
+    // 3. If we see "Unknown" (face lost), WAIT 2 SECONDS before clearing.
+    // This prevents flickering.
+    if (name === "Unknown" && urlName && !debounceTimer) {
+        debounceTimer = setTimeout(() => {
+            const currentUrl = new URL(window.parent.location.href);
+            currentUrl.searchParams.delete("detected_name");
+            currentUrl.searchParams.delete("c_date");
+            currentUrl.searchParams.delete("c_time");
+            // Soft update (no reload needed for clearing)
+            window.parent.history.replaceState({}, "", currentUrl);
+            debounceTimer = null;
+        }, 2000); // 2 Second Stickiness
     }
 }
 
 async function predictVideo() {
     const now = performance.now();
     
-    // Auto-Resize Canvas
     if (canvas.width !== video.videoWidth) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -157,14 +173,12 @@ async function predictVideo() {
             if (results.faceLandmarks.length > 0) {
                 const landmarks = results.faceLandmarks[0];
                 
-                // --- POSE CHECK ---
                 if (!isFaceFrontal(landmarks)) {
                      drawBox(landmarks, "#FF4B4B", "LOOK STRAIGHT");
                      manageState("Unknown"); 
                 } else {
                     const name = findMatch(landmarks);
 
-                    // --- TIMER LOGIC ---
                     if (name !== currentMatch) {
                         currentMatch = name;
                         matchStartTime = now;
@@ -173,18 +187,15 @@ async function predictVideo() {
                     const timeElapsed = now - matchStartTime;
                     const isUnknown = (currentMatch === "Unknown");
                     
-                    // --- PRE-VERIFICATION (THE FIX) ---
-                    // If the URL already matches the face, we trust it instantly.
+                    // PRE-VERIFY: If URL says it's you, believe it instantly
                     const urlName = new URL(window.parent.location.href).searchParams.get("detected_name");
                     const isPreVerified = (currentMatch === urlName && !isUnknown);
                     
-                    // Verified if: Already verified OR Timer passed
                     const isVerified = isPreVerified || (!isUnknown && timeElapsed > 1000); 
 
-                    // --- DRAW FIRST, THEN MANAGE STATE ---
                     if (isVerified) {
                         drawBox(landmarks, "#00FF00", currentMatch);
-                        manageState(currentMatch); // This might reload the page
+                        manageState(currentMatch);
                     } else if (!isUnknown) {
                         drawBox(landmarks, "#FFFF00", "VERIFYING...");
                     } else {
