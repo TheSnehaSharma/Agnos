@@ -26,7 +26,6 @@ def save_auth(data):
     with open(AUTH_FILE, "w") as f: json.dump(data, f)
 
 def get_file_paths(org_key):
-    # Returns specific paths for this Organization Key
     return {
         "db": os.path.join(DATA_DIR, f"faces_{org_key}.json"),
         "logs": os.path.join(DATA_DIR, f"logs_{org_key}.pkl")
@@ -43,21 +42,25 @@ if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 def load_org_data(org_key):
     paths = get_file_paths(org_key)
     
-    # 1. Load Faces (Strict Isolation)
+    # 1. Load Faces
     if os.path.exists(paths["db"]):
         with open(paths["db"], "r") as f: st.session_state.db = json.load(f)
     else:
-        st.session_state.db = {} # Start fresh for this Org
+        st.session_state.db = {} 
     
-    # 2. Load Logs
-    st.session_state.logged_set = set()
+    # 2. Load Logs (CRITICAL FIX: Wipe logged_set first)
+    st.session_state.logged_set = set() 
+    
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
-            logs = pickle.load(f)
-            today = datetime.now().strftime("%Y-%m-%d")
-            for entry in logs:
-                if entry["Date"] == today:
-                    st.session_state.logged_set.add(entry["Name"])
+            try:
+                logs = pickle.load(f)
+                today = datetime.now().strftime("%Y-%m-%d")
+                for entry in logs:
+                    if entry["Date"] == today:
+                        st.session_state.logged_set.add(entry["Name"])
+            except Exception:
+                pass 
 
 def save_log(name):
     if not st.session_state.auth_status: return False
@@ -69,7 +72,6 @@ def save_log(name):
     
     today = datetime.now().strftime("%Y-%m-%d")
     
-    # Avoid duplicate logs for same day
     if not any(e['Name'] == name and e['Date'] == today for e in logs):
         entry = {"Name": name, "Time": datetime.now().strftime("%H:%M:%S"), "Date": today}
         logs.append(entry)
@@ -81,7 +83,6 @@ def save_log(name):
 # --- AUTO-LOGGING TRIGGER ---
 if "detected_name" in st.query_params:
     det_name = st.query_params["detected_name"]
-    # Only log if user is Authenticated
     if st.session_state.auth_status and det_name and det_name != "Unknown":
         if save_log(det_name):
             st.toast(f"✅ Verified: {det_name}", icon="🔐")
@@ -94,7 +95,7 @@ st.markdown("""
     canvas { position:absolute; top:0; left:0; z-index:10; }
     video { position:absolute; top:0; left:0; z-index:5; }
     .stDeployButton {display:none;}
-    .reportview-container .main .block-container { padding-top: 1rem; }
+    div[data-testid="stForm"] { border: 1px solid #333; padding: 20px; border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,7 +135,6 @@ function getFaceVector(landmarks) {
     for(let p of landmarks) { cx+=p.x; cy+=p.y; cz+=p.z; }
     cx/=landmarks.length; cy/=landmarks.length; cz/=landmarks.length;
 
-    // 42 Rigid Points
     const indices = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
     const vec = [];
     for(let i of indices) {
@@ -296,45 +296,54 @@ if not st.session_state.auth_status:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.title("🔐 Agnos Login")
-        st.markdown("Enter your Organization Key to access or create your secure database.")
+        st.markdown("Enter your Organization Key to proceed.")
         
-        with st.form("login_form"):
-            key_in = st.text_input("Organization Key (5 Char)", max_chars=5).upper()
+        # KEY INPUT (Outside Form to allow dynamic checking)
+        key_in = st.text_input("Organization Key (5 Char)", max_chars=5, placeholder="e.g. ALPHA").upper()
+        
+        # Check logic
+        auth_db = load_auth()
+        is_known = False
+        if len(key_in) == 5:
+            is_known = key_in in auth_db
             
-            # Check if key exists to show correct prompt
-            auth_db = load_auth()
-            key_exists = key_in in auth_db
-            
-            pass_label = "Enter Password" if key_exists else "Create Password (New Org)"
-            pass_in = st.text_input(pass_label, type="password")
-            
-            submitted = st.form_submit_button("Access System")
-            
-            if submitted:
-                if len(key_in) != 5:
-                    st.error("Key must be exactly 5 characters.")
-                elif len(pass_in) == 0:
-                    st.error("Password cannot be empty.")
-                else:
-                    if key_exists:
-                        # VERIFY PASSWORD
-                        if auth_db[key_in] == hashlib.sha256(pass_in.encode()).hexdigest():
+            if is_known:
+                st.info(f"✅ Organization found: **{key_in}**")
+            else:
+                st.warning(f"🆕 Organization **{key_in}** is available!")
+
+            # PASSWORD FORM
+            with st.form("auth_form"):
+                btn_label = "Sign In" if is_known else "Sign Up & Create"
+                pass_label = "Enter Password" if is_known else "Create New Password"
+                
+                pass_in = st.text_input(pass_label, type="password")
+                submitted = st.form_submit_button(btn_label, type="primary")
+                
+                if submitted:
+                    if len(pass_in) < 1:
+                        st.error("Password cannot be empty.")
+                    else:
+                        hashed_pw = hashlib.sha256(pass_in.encode()).hexdigest()
+                        
+                        if is_known:
+                            # LOGIN
+                            if auth_db[key_in] == hashed_pw:
+                                st.session_state.auth_status = True
+                                st.session_state.org_key = key_in
+                                load_org_data(key_in)
+                                st.rerun()
+                            else:
+                                st.error("❌ Incorrect Password")
+                        else:
+                            # SIGNUP
+                            auth_db[key_in] = hashed_pw
+                            save_auth(auth_db)
                             st.session_state.auth_status = True
                             st.session_state.org_key = key_in
-                            load_org_data(key_in)
+                            load_org_data(key_in) # Loads empty DB
+                            st.success("Organization Created!")
                             st.rerun()
-                        else:
-                            st.error("Incorrect Password.")
-                    else:
-                        # REGISTER NEW ORG
-                        auth_db[key_in] = hashlib.sha256(pass_in.encode()).hexdigest()
-                        save_auth(auth_db)
-                        st.session_state.auth_status = True
-                        st.session_state.org_key = key_in
-                        # Init Empty DB for this Org
-                        st.session_state.db = {} 
-                        st.success("New Organization Created!")
-                        st.rerun()
 
 else:
     # --- LOGGED IN UI ---
@@ -351,6 +360,7 @@ else:
             st.session_state.auth_status = False
             st.session_state.org_key = None
             st.session_state.db = {}
+            st.session_state.logged_set = set() # Reset logs on logout
             st.rerun()
 
     # MAIN CONTENT
