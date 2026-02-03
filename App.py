@@ -50,10 +50,10 @@ def load_org_data(org_key):
     else:
         st.session_state.db = {} 
     
-    # 2. Clear Previous Logs Memory
+    # 2. Clear Memory
     st.session_state.logged_set = set() 
     
-    # 3. Load New Logs
+    # 3. Load Logs
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
             try:
@@ -238,6 +238,7 @@ async function predictVideo() {
             if (isVerified) {
                 try {
                     const url = new URL(window.parent.location.href);
+                    // Prevent spamming the same name
                     if (url.searchParams.get("detected_name") !== currentMatch) {
                         url.searchParams.set("detected_name", currentMatch);
                         
@@ -383,7 +384,7 @@ else:
         st.title("🛡️ Agnos")
         st.caption(f"Org: {st.session_state.org_key}")
         st.metric("Users", len(st.session_state.db))
-        st.metric("Logs", len(st.session_state.logged_set))
+        st.metric("Logs Today", len(st.session_state.logged_set))
         st.markdown("---")
         if st.button("Log Out"):
             st.session_state.auth_status = False
@@ -427,10 +428,18 @@ else:
             st.subheader("Live Feed")
             if "detected_name" in st.query_params:
                 det = st.query_params["detected_name"]
-                st.success(f"**ACCESS GRANTED**")
-                st.markdown(f"<h1 style='font-size:3em;'>{det}</h1>", unsafe_allow_html=True)
-                if "c_time" in st.query_params:
-                    st.caption(f"Logged at {st.query_params['c_time']}")
+                
+                # AUTO-CLEAR LOGIC:
+                # Check timestamp. If > 3 seconds old, clear the display.
+                ts = float(st.query_params.get("ts", 0))
+                if time.time() * 1000 - ts > 3000:
+                    st.query_params.clear()
+                    st.rerun()
+                else:
+                    st.success(f"**ACCESS GRANTED**")
+                    st.markdown(f"<h1 style='font-size:3em;'>{det}</h1>", unsafe_allow_html=True)
+                    if "c_time" in st.query_params:
+                        st.caption(f"Logged at {st.query_params['c_time']}")
             else:
                 st.info("System Active")
                 st.markdown("*Waiting for personnel...*")
