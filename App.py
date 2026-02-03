@@ -1,5 +1,5 @@
 import streamlit as st
-import pd
+import pandas as pd
 import cv2
 import numpy as np
 import base64
