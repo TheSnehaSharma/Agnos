@@ -5,22 +5,25 @@ import os
 import base64
 from insightface.app import FaceAnalysis
 
-# ---------------- CONFIG ----------------
+# ================= CONFIG =================
 DB_FOLDER = "registered_faces"
 SIM_THRESHOLD = 0.5
 os.makedirs(DB_FOLDER, exist_ok=True)
 
-st.set_page_config("Iron-Vision", layout="wide")
+st.set_page_config("Iron-Vision Biometric", layout="wide")
 
-# ---------------- STATE ----------------
+# ================= STATE =================
 if "identity" not in st.session_state:
     st.session_state.identity = "SCANNING"
     st.session_state.score = 0
 
-# ---------------- AI ENGINE ----------------
+# ================= AI ENGINE =================
 @st.cache_resource
 def load_engine():
-    app = FaceAnalysis(name="buffalo_s", providers=["CPUExecutionProvider"])
+    app = FaceAnalysis(
+        name="buffalo_s",
+        providers=["CPUExecutionProvider"]
+    )
     app.prepare(ctx_id=0, det_size=(320, 320))
     return app
 
@@ -38,12 +41,15 @@ def load_face_db():
                 db[f.split(".")[0]] = faces[0].normed_embedding
     return db
 
-# ---------------- NAV ----------------
-page = st.sidebar.radio("Navigation", ["Live Scanner", "Register Face"])
+# ================= NAV =================
+page = st.sidebar.radio(
+    "Navigation",
+    ["Live Scanner", "Register Face", "Manage Registered Faces"]
+)
 
-# =====================================================
-# ===================== LIVE SCANNER ==================
-# =====================================================
+# =========================================================
+# ======================= LIVE SCANNER ====================
+# =========================================================
 if page == "Live Scanner":
 
     JS_BRIDGE = r"""
@@ -53,12 +59,9 @@ if page == "Live Scanner":
 
     <div style="position:relative;width:100vw;height:100vh;">
       <video id="v" autoplay playsinline
-        style="width:100%;height:100%;object-fit:cover;
-               transform:scaleX(-1)"></video>
-
+        style="width:100%;height:100%;object-fit:cover;"></video>
       <canvas id="o"
-        style="position:absolute;top:0;left:0;width:100%;height:100%;
-               transform:scaleX(-1);"></canvas>
+        style="position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
@@ -69,7 +72,6 @@ if page == "Live Scanner":
     const v = document.getElementById("v");
     const o = document.getElementById("o");
     const ctx = o.getContext("2d");
-
     const c = document.createElement("canvas");
     const cctx = c.getContext("2d");
 
@@ -91,7 +93,6 @@ if page == "Live Scanner":
       const w = b.width*o.width;
       const h = b.height*o.height;
 
-      // Draw box (mirrored display)
       ctx.strokeStyle = "#00ff00";
       ctx.lineWidth = 3;
       ctx.strokeRect(x,y,w,h);
@@ -100,26 +101,17 @@ if page == "Live Scanner":
       ctx.font = "18px monospace";
       ctx.fillText(`${NAME} (${SCORE}%)`, x, y-10);
 
-      // -------- UN-MIRROR FOR RECOGNITION --------
       const vw = v.videoWidth;
       const vh = v.videoHeight;
 
       const cw = b.width * 2 * vw;
       const ch = b.height * 2 * vh;
-
-      // Convert mirrored x back to real x
-      const realX = vw - (b.xCenter * vw) - cw/2;
-      const realY = b.yCenter * vh - ch/2;
+      const cx = b.xCenter * vw - cw/2;
+      const cy = b.yCenter * vh - ch/2;
 
       c.width = 160;
       c.height = 160;
-
-      cctx.setTransform(1,0,0,1,0,0);
-      cctx.drawImage(
-        v,
-        realX, realY, cw, ch,
-        0, 0, 160, 160
-      );
+      cctx.drawImage(v, cx, cy, cw, ch, 0, 0, 160, 160);
 
       if (window.Streamlit) {
         Streamlit.setComponentValue(
@@ -172,15 +164,15 @@ if page == "Live Scanner":
                 st.session_state.identity = "UNKNOWN"
                 st.session_state.score = int(score * 100)
 
-# =====================================================
-# ==================== REGISTER FACE ==================
-# =====================================================
+# =========================================================
+# ===================== REGISTER FACE =====================
+# =========================================================
 elif page == "Register Face":
 
-    st.header("👤 Register Face")
+    st.header("👤 Register New Face")
 
     name = st.text_input("Full Name").upper().strip()
-    img = st.file_uploader("Upload image", ["jpg","png","jpeg"])
+    img = st.file_uploader("Upload face image", ["jpg","png","jpeg"])
 
     if st.button("Register"):
         if not name or not img:
@@ -191,6 +183,25 @@ elif page == "Register Face":
             st.cache_resource.clear()
             st.success(f"Registered {name}")
 
-    st.markdown("### Registered Users")
-    for f in os.listdir(DB_FOLDER):
-        st.write("✅", f.split(".")[0])
+# =========================================================
+# ================= MANAGE REGISTERED FACES ===============
+# =========================================================
+elif page == "Manage Registered Faces":
+
+    st.header("🗂️ Manage Registered Faces")
+
+    files = [
+        f for f in os.listdir(DB_FOLDER)
+        if f.lower().endswith((".jpg",".png",".jpeg"))
+    ]
+
+    if not files:
+        st.info("No registered faces.")
+    else:
+        for f in files:
+            col1, col2 = st.columns([4,1])
+            col1.write(f"✅ {f.split('.')[0]}")
+            if col2.button("Delete", key=f):
+                os.remove(os.path.join(DB_FOLDER, f))
+                st.cache_resource.clear()
+                st.rerun()
