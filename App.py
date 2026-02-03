@@ -6,13 +6,43 @@ import base64
 import pickle
 from datetime import datetime
 
-# --- CONFIG & STORAGE ---
+# --- CONFIGURATION ---
 DB_FILE = "registered_faces.json"
 PKL_LOG = "attendance_data.pkl"
 
-st.set_page_config(page_title="Agnos", layout="wide")
+st.set_page_config(
+    page_title="Biometric Attendance",
+    page_icon="👁️",
+    layout="centered", # Centered looks better for mobile/focused view
+    initial_sidebar_state="collapsed"
+)
 
-# --- SESSION STATE ---
+# --- CUSTOM CSS FOR MODERN UI ---
+st.markdown("""
+<style>
+    /* Remove default padding */
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+    
+    /* Custom Status Cards */
+    .status-card {
+        background-color: #1E1E1E;
+        border: 1px solid #333;
+        border-radius: 10px;
+        padding: 20px;
+        text-align: center;
+        margin-top: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }
+    .status-success { border-left: 5px solid #00FF00; color: #00FF00; }
+    .status-unknown { border-left: 5px solid #FF4B4B; color: #FF4B4B; }
+    .status-waiting { border-left: 5px solid #FFFF00; color: #CCCCCC; }
+    
+    /* Header Styling */
+    h1, h2, h3 { font-family: 'Segoe UI', sans-serif; font-weight: 600; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- SESSION STATE INITIALIZATION ---
 if "db" not in st.session_state:
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f:
@@ -22,20 +52,8 @@ if "db" not in st.session_state:
 
 if "logged_set" not in st.session_state:
     st.session_state.logged_set = set()
-if "last_detected" not in st.session_state:
-    st.session_state.last_detected = None
 
-# --- CSS ---
-CSS_CODE = """
-<style>
-body { margin:0; background:#0e1117; color:#00FF00; font-family: monospace; overflow:hidden; }
-#view { position:relative; width:100%; height:400px; border-radius:12px; overflow:hidden; background:#000; border:1px solid #333; }
-video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; }
-#status-bar { position:absolute; top:0; left:0; right:0; background:rgba(0,0,0,0.8); padding:8px; font-size:11px; z-index:100; }
-</style>
-"""
-
-# --- JS CODE: 3D Biometric Fingerprinting ---
+# --- JAVASCRIPT: 3D BIOMETRIC ENGINE ---
 JS_CODE = """
 <script type="module">
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
@@ -52,8 +70,6 @@ const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
 
-// --- 3D Euclidean Distance ---
-// MediaPipe Z is roughly the same scale as X.
 function getDist3D(p1, p2) {
     return Math.sqrt(
         Math.pow(p1.x - p2.x, 2) + 
@@ -62,45 +78,33 @@ function getDist3D(p1, p2) {
     );
 }
 
-// --- Generate Biometric Fingerprint (The "Face Vector") ---
-// We calculate relative distances between rigid bone points.
 function getFaceVector(landmarks) {
-    // Key landmarks that don't move much when you talk
-    const L_EYE = landmarks[468]; // Left Iris
-    const R_EYE = landmarks[473]; // Right Iris
-    const NOSE  = landmarks[4];   // Nose Tip
-    const CHIN  = landmarks[152]; // Chin
-    const L_EAR = landmarks[234]; // Left Cheek/Ear area
-    const R_EAR = landmarks[454]; // Right Cheek/Ear area
+    const L_EYE = landmarks[468]; 
+    const R_EYE = landmarks[473]; 
+    const NOSE  = landmarks[4];   
+    const CHIN  = landmarks[152]; 
+    const L_EAR = landmarks[234]; 
+    const R_EAR = landmarks[454]; 
     
-    // 1. ANCHOR: The distance between eyes (Inter-Pupillary Distance)
-    // We divide everything by this to handle distance from camera.
     const eyeDist = getDist3D(L_EYE, R_EYE);
 
-    // 2. FEATURES: Calculate 5 rigid geometric ratios (3D)
-    // We use an array to store the "fingerprint"
     return [
-        getDist3D(NOSE, L_EYE) / eyeDist,  // Nose to L-Eye
-        getDist3D(NOSE, R_EYE) / eyeDist,  // Nose to R-Eye
-        getDist3D(NOSE, CHIN)  / eyeDist,  // Nose length
-        getDist3D(L_EAR, R_EAR)/ eyeDist,  // Face Width
-        getDist3D(L_EYE, CHIN) / eyeDist,  // Eye to Chin (Triangle L)
-        getDist3D(R_EYE, CHIN) / eyeDist   // Eye to Chin (Triangle R)
+        getDist3D(NOSE, L_EYE) / eyeDist,  
+        getDist3D(NOSE, R_EYE) / eyeDist,  
+        getDist3D(NOSE, CHIN)  / eyeDist,  
+        getDist3D(L_EAR, R_EAR)/ eyeDist,  
+        getDist3D(L_EYE, CHIN) / eyeDist,  
+        getDist3D(R_EYE, CHIN) / eyeDist   
     ];
 }
 
-// --- Weighted Similarity Search ---
 function findMatch(currentLandmarks) {
     const currentVec = getFaceVector(currentLandmarks);
     let bestMatch = { name: "Unknown", error: 100 };
-
-    // Weights allow us to care MORE about bone structure (Eyes/Nose) 
-    // and LESS about the jaw (which moves when talking)
     const weights = [2.0, 2.0, 1.0, 1.5, 1.0, 1.0]; 
 
     for (const [name, savedLandmarks] of Object.entries(registry)) {
         const savedVec = getFaceVector(savedLandmarks);
-        
         let weightedError = 0;
         let totalWeight = 0;
 
@@ -111,25 +115,18 @@ function findMatch(currentLandmarks) {
         }
 
         const avgError = weightedError / totalWeight;
-
         if (avgError < bestMatch.error) {
             bestMatch = { name: name, error: avgError };
         }
     }
 
-    // --- Strict Thresholding ---
-    // With 3D math, the error is usually very low for the same person.
-    // 0.05 is a good tight threshold.
     if (bestMatch.error < 0.08) {
-        // Convert low error to high confidence %
-        const confidence = Math.max(0, Math.floor((1 - (bestMatch.error / 0.1)) * 100));
-        return { name: bestMatch.name, conf: confidence }; 
+        return { name: bestMatch.name }; 
     } else {
-        return { name: "Unknown", conf: 0 };
+        return { name: "Unknown" };
     }
 }
 
-// --- Init MediaPipe ---
 async function init() {
     try {
         const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
@@ -177,16 +174,16 @@ async function predictVideo() {
 
         const color = match.name === "Unknown" ? "#FF4B4B" : "#00FF00";
         ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
-        ctx.fillStyle = color; ctx.fillRect(x, y - 25, w, 25);
-        ctx.fillStyle = "white"; ctx.font = "bold 14px monospace";
-        ctx.fillText(`${match.name}`, x + 5, y - 8);
-
+        
+        // Only update python if the name changes to reduce flickering reruns
         if (match.name !== "Unknown") {
-            const url = new URL(window.parent.location.href);
-            if (url.searchParams.get("detected") !== match.name) {
-                url.searchParams.set("detected", match.name);
-                window.parent.history.replaceState({}, "", url);
-            }
+             const url = new URL(window.parent.location.href);
+             if (url.searchParams.get("detected") !== match.name) {
+                 url.searchParams.set("detected", match.name);
+                 window.parent.history.replaceState({}, "", url);
+                 // Trigger rerun immediately
+                 window.parent.postMessage({ type: 'streamlit:setComponentValue', value: match.name }, "*");
+             }
         }
     }
     window.requestAnimationFrame(predictVideo);
@@ -195,87 +192,169 @@ async function predictVideo() {
 init();
 </script>
 """
-# --- HTML component ---
+
+# --- COMPONENT WRAPPER ---
 def get_component_html(img_b64=None):
     db_json = json.dumps(st.session_state.db)
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
-    html = f"<!DOCTYPE html><html><head>{CSS_CODE}</head><body>"
-    html += f'<div id="view"><div id="status-bar">BRIDGE-SYNC ACTIVE</div>'
+    
+    # CSS for the embedded video
+    css = """
+    <style>
+    body { margin:0; background:#000; overflow:hidden; }
+    #view { position:relative; width:100%; height:400px; background:#000; border-radius:12px; overflow:hidden;}
+    video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; }
+    #status-bar { position:absolute; bottom:0; left:0; right:0; background:rgba(0,0,0,0.6); color:#fff; padding:4px; font-size:10px; text-align:center;}
+    </style>
+    """
+    
+    html = f"<!DOCTYPE html><html><head>{css}</head><body>"
+    html += f'<div id="view"><div id="status-bar">Waiting for camera...</div>'
     html += f'<video id="webcam" autoplay muted playsinline style="display: {"none" if img_b64 else "block"}"></video>'
     html += f'<img id="static-img" style="display: {"block" if img_b64 else "none"}">'
     html += f'<canvas id="overlay"></canvas></div>{JS_CODE}</body></html>'
+    
     return html.replace("STATIC_IMG_PLACEHOLDER", img_val)\
                .replace("RUN_MODE_PLACEHOLDER", "IMAGE" if img_b64 else "VIDEO")\
                .replace("DB_JSON_PLACEHOLDER", db_json)
 
-# --- Pickle logging ---
-def save_attendance_pkl(name):
+# --- BACKEND LOGIC ---
+def save_attendance(name):
     logs = []
     if os.path.exists(PKL_LOG):
-        with open(PKL_LOG,"rb") as f: logs = pickle.load(f)
-    entry = {"Name":name, "Time":datetime.now().strftime("%H:%M:%S"), "Date":datetime.now().strftime("%Y-%m-%d")}
-    logs.append(entry)
-    with open(PKL_LOG,"wb") as f: pickle.dump(logs, f)
+        with open(PKL_LOG, "rb") as f:
+            logs = pickle.load(f)
+    
+    # Check if already logged TODAY
+    today = datetime.now().strftime("%Y-%m-%d")
+    already_logged = any(entry['Name'] == name and entry['Date'] == today for entry in logs)
+    
+    if not already_logged:
+        entry = {
+            "Name": name, 
+            "Time": datetime.now().strftime("%H:%M:%S"), 
+            "Date": today
+        }
+        logs.append(entry)
+        with open(PKL_LOG, "wb") as f:
+            pickle.dump(logs, f)
+        return True, entry
+    return False, None
 
-# --- UI ---
-page = st.sidebar.radio("Navigate", ["Register","Live Feed","Log"])
+# --- MAIN UI ---
+st.title("👁️ Secure Entry System")
 
-if page=="Register":
-    st.header("👤 Face Registration")
-    name = st.text_input("Full Name").upper()
-    uploaded = st.file_uploader("Upload Profile Image", type=['jpg','jpeg','png'])
-    if uploaded:
-        b64 = base64.b64encode(uploaded.getvalue()).decode()
-        st.components.v1.html(get_component_html(b64), height=420)
+# Navigation Tabs (Cleaner than sidebar)
+tab1, tab2, tab3 = st.tabs(["🎥 Live Scan", "👤 Register", "📊 Attendance Logs"])
 
-    url_data = st.query_params.get("face_data")
-    if url_data and name:
-        if st.button("Confirm Registration"):
-            st.session_state.db[name] = json.loads(base64.b64decode(url_data).decode())
-            with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
-            st.query_params.clear()
-            st.success(f"Registered {name}!")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("🗂️ Manage Database")
-    for reg_name in list(st.session_state.db.keys()):
-        col_n,col_b = st.columns([4,1])
-        col_n.write(f"✅ {reg_name}")
-        if col_b.button("Delete", key=f"del_{reg_name}"):
-            del st.session_state.db[reg_name]
-            with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
-            st.rerun()
-
-elif page=="Live Feed":
-    st.header("📹 Live Scanner")
-    col_v,col_m = st.columns([3,1])
-
+# --- TAB 1: LIVE SCAN ---
+with tab1:
+    st.write("Look at the camera to mark attendance.")
+    
+    # The Video Component
+    st.components.v1.html(get_component_html(), height=420)
+    
+    # The "Instant Feedback" Status Panel
     detected_name = st.query_params.get("detected")
-
-    with col_v:
-        st.components.v1.html(get_component_html(), height=420)
-
-    with col_m:
-        st.subheader("Attendance Status")
-        if detected_name and detected_name!="Unknown":
-            st.success(f"Recognized: {detected_name}")
-            if detected_name not in st.session_state.logged_set:
-                save_attendance_pkl(detected_name)
-                st.session_state.logged_set.add(detected_name)
-                st.toast(f"✅ {detected_name} saved to pickle!")
-            st.session_state.last_detected = detected_name
+    
+    if detected_name and detected_name != "Unknown":
+        # Save to DB
+        is_new, entry = save_attendance(detected_name)
+        
+        if is_new:
+            st.markdown(f"""
+            <div class="status-card status-success">
+                <h2>✅ Access Granted</h2>
+                <h3>Welcome, {detected_name}</h3>
+                <p>Logged at {entry['Time']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            st.toast(f"Welcome {detected_name}!")
         else:
-            st.info("Scanning...")
-
-elif page=="Log":
-    st.header("📊 Attendance Log")
-    if os.path.exists(PKL_LOG):
-        with open(PKL_LOG,"rb") as f: logs = pickle.load(f)
-        st.table(pd.DataFrame(logs))
-        if st.button("🗑️ Reset Logs"):
-            os.remove(PKL_LOG)
-            st.session_state.logged_set = set()
-            st.rerun()
+            # Already logged today
+            st.markdown(f"""
+            <div class="status-card status-success" style="opacity: 0.7;">
+                <h3>👋 Hello, {detected_name}</h3>
+                <p>Attendance already marked for today.</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
     else:
-        st.info("No logs found.")
+        st.markdown("""
+        <div class="status-card status-waiting">
+            <h3>🔭 Scanning...</h3>
+            <p>Please face the camera directly.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+# --- TAB 2: REGISTER ---
+with tab2:
+    st.header("Add New Member")
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        name_input = st.text_input("Full Name (Required)", placeholder="e.g. John Doe").upper()
+        uploaded_file = st.file_uploader("Upload Profile Photo", type=['jpg', 'png', 'jpeg'])
+
+    with col2:
+        if uploaded_file and name_input:
+            # Convert to Base64 for processing
+            b64_img = base64.b64encode(uploaded_file.getvalue()).decode()
+            
+            # Show preview
+            st.image(uploaded_file, caption="Preview", use_container_width=True)
+            
+            # Hidden component to process the image for landmarks
+            st.markdown("**Processing biometric data...**")
+            st.components.v1.html(get_component_html(b64_img), height=0, width=0)
+            
+            # Check for return data
+            face_data_str = st.query_params.get("face_data")
+            
+            if face_data_str:
+                if st.button("💾 Save Registration", type="primary"):
+                    face_data = json.loads(base64.b64decode(face_data_str).decode())
+                    st.session_state.db[name_input] = face_data
+                    with open(DB_FILE, "w") as f:
+                        json.dump(st.session_state.db, f, indent=4)
+                    
+                    st.success(f"Successfully registered {name_input}!")
+                    st.query_params.clear()
+                    st.rerun()
+        else:
+            st.info("Enter name and upload photo to proceed.")
+
+# --- TAB 3: LOGS & DOWNLOAD ---
+with tab3:
+    st.header("Attendance Records")
+    
+    if os.path.exists(PKL_LOG):
+        with open(PKL_LOG, "rb") as f:
+            logs = pickle.load(f)
+        
+        if logs:
+            df = pd.DataFrame(logs)
+            
+            # Top Controls
+            col_l, col_r = st.columns([4, 1])
+            with col_l:
+                st.dataframe(df, use_container_width=True)
+            with col_r:
+                # CSV Download Button
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv,
+                    file_name=f"attendance_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                    mime="text/csv",
+                    type="primary"
+                )
+                
+                st.write("") # Spacer
+                if st.button("🗑️ Clear Logs"):
+                    os.remove(PKL_LOG)
+                    st.rerun()
+        else:
+            st.info("Log file exists but is empty.")
+    else:
+        st.info("No attendance records found yet.")
