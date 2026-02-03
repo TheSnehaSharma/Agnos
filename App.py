@@ -6,8 +6,8 @@ import base64
 import pickle
 import time
 import hashlib
+import uuid
 from datetime import datetime
-import uuid  # Added for unique session IDs
 
 # --- CONFIGURATION ---
 DATA_DIR = "agnos_data"
@@ -38,7 +38,6 @@ if "org_key" not in st.session_state: st.session_state.org_key = None
 if "db" not in st.session_state: st.session_state.db = {}
 if "logged_set" not in st.session_state: st.session_state.logged_set = set()
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
-# CRITICAL FIX: Unique ID to force-kill the camera component on logout
 if "component_key" not in st.session_state: st.session_state.component_key = str(uuid.uuid4())
 
 # --- BACKEND LOGIC ---
@@ -51,19 +50,16 @@ def load_org_data(org_key):
     else:
         st.session_state.db = {} 
     
-    # 2. Wipe Logs Memory
+    # 2. Clear Previous Logs Memory
     st.session_state.logged_set = set() 
     
-    # 3. Load Current Org Logs
+    # 3. Load New Logs
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
             try:
                 logs = pickle.load(f)
-                # We can only approximate "today" filtering here
-                today_server = datetime.now().strftime("%Y-%m-%d")
                 for entry in logs:
-                    if entry["Date"] == today_server:
-                        st.session_state.logged_set.add(entry["Name"])
+                    st.session_state.logged_set.add(entry["Name"])
             except Exception:
                 pass 
 
@@ -75,7 +71,7 @@ def save_log(name, date_str, time_str):
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f: logs = pickle.load(f)
     
-    # Check duplicate entry for specific Date (Client Side Date)
+    # Check duplicate entry for specific Date
     if not any(e['Name'] == name and e['Date'] == date_str for e in logs):
         entry = {
             "Name": name, 
@@ -228,6 +224,7 @@ async function predictVideo() {
             const landmarks = results.faceLandmarks[0];
             const name = findMatch(landmarks);
 
+            // --- STABILITY LOGIC ---
             if (name !== currentMatch) {
                 currentMatch = name;
                 matchStartTime = now;
@@ -237,6 +234,7 @@ async function predictVideo() {
             const isUnknown = (currentMatch === "Unknown");
             const isVerified = (!isUnknown && timeElapsed > 1000); 
 
+            // --- TRIGGER PYTHON (Once Verified) ---
             if (isVerified) {
                 try {
                     const url = new URL(window.parent.location.href);
@@ -363,7 +361,6 @@ if not st.session_state.auth_status:
                             if auth_db[key_in] == hashed_pw:
                                 st.session_state.auth_status = True
                                 st.session_state.org_key = key_in
-                                # Generate NEW component key to force iframe rebuild
                                 st.session_state.component_key = str(uuid.uuid4())
                                 load_org_data(key_in)
                                 st.rerun()
@@ -386,7 +383,7 @@ else:
         st.title("🛡️ Agnos")
         st.caption(f"Org: {st.session_state.org_key}")
         st.metric("Users", len(st.session_state.db))
-        st.metric("Logs Today", len(st.session_state.logged_set))
+        st.metric("Logs", len(st.session_state.logged_set))
         st.markdown("---")
         if st.button("Log Out"):
             st.session_state.auth_status = False
@@ -394,16 +391,37 @@ else:
             st.session_state.db = {}
             st.session_state.logged_set = set()
             st.rerun()
+            
+        # --- DANGER ZONE ---
+        with st.expander("⚠️ Danger Zone"):
+            st.warning("This action cannot be undone.")
+            if st.button("DELETE ORGANIZATION", type="primary"):
+                # 1. Delete Files
+                paths = get_file_paths(st.session_state.org_key)
+                if os.path.exists(paths['db']): os.remove(paths['db'])
+                if os.path.exists(paths['logs']): os.remove(paths['logs'])
+                
+                # 2. Remove from Registry
+                auth_db = load_auth()
+                if st.session_state.org_key in auth_db:
+                    del auth_db[st.session_state.org_key]
+                    save_auth(auth_db)
+                
+                # 3. Logout
+                st.session_state.auth_status = False
+                st.session_state.org_key = None
+                st.session_state.db = {}
+                st.rerun()
 
     st.title("Agnos Enterprise Biometrics")
     
+    # TABS NAVIGATION
     tab_scan, tab_reg, tab_logs, tab_db = st.tabs(["🎥 Scanner", "👤 Register", "📊 Logs", "🗄️ Database"])
 
-    # TAB 1: SCANNER
     with tab_scan:
         c_vid, c_stat = st.columns([2, 1])
         with c_vid:
-            # FORCE REBUILD ON ORG CHANGE
+            # We use a unique key here to force rebuilds on org change
             st.components.v1.html(get_component_html(), height=500)
         with c_stat:
             st.subheader("Live Feed")
@@ -417,7 +435,6 @@ else:
                 st.info("System Active")
                 st.markdown("*Waiting for personnel...*")
 
-    # TAB 2: REGISTER
     with tab_reg:
         st.subheader("Register New Personnel")
         c1, c2 = st.columns([2, 1])
@@ -428,7 +445,6 @@ else:
             if file_in:
                 st.image(file_in, width=200, caption="Preview")
                 b64 = base64.b64encode(file_in.getvalue()).decode()
-                # Use component key to ensure this iframe is also isolated
                 st.components.v1.html(get_component_html(b64), height=0, width=0)
                 
                 if "face_data" in st.query_params:
@@ -445,7 +461,6 @@ else:
                         st.rerun()
                 else: st.info("Analyzing biometrics...")
 
-    # TAB 3: LOGS
     with tab_logs:
         st.subheader(f"Logs for Org: {st.session_state.org_key}")
         paths = get_file_paths(st.session_state.org_key)
@@ -467,7 +482,6 @@ else:
             else: st.info("No logs found.")
         else: st.info("No logs found.")
         
-    # TAB 4: DATABASE
     with tab_db:
         st.subheader("Manage Database")
         st.warning("Deleting a user here removes them permanently.")
