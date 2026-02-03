@@ -108,24 +108,23 @@ async function init() {
     }
 }
 
-// --- STATE LOCK LOGIC ---
+// --- STATE MANAGEMENT ---
 function manageState(name) {
     const url = new URL(window.parent.location.href);
     const urlName = url.searchParams.get("detected_name");
 
-    // 1. If what we see (name) matches what URL says (urlName), DO NOTHING.
-    // This stabilizes the system and prevents infinite reloads.
+    // 1. Stable State: If we see what the URL says, do nothing.
     if (name === urlName) return;
 
-    // 2. If name changed (e.g. Unknown -> John, or John -> Unknown)
+    // 2. Change State
     if (name === "Unknown") {
-        // Silently clear URL so Python stops showing the Toast
+        // Soft clear (no reload needed)
         url.searchParams.delete("detected_name");
         url.searchParams.delete("c_date");
         url.searchParams.delete("c_time");
         window.parent.history.replaceState({}, "", url);
     } else {
-        // We found a new person! Update URL and FORCE RELOAD to notify Python.
+        // New Person -> Hard Reload to Trigger Python
         url.searchParams.set("detected_name", name);
         
         const d = new Date();
@@ -142,6 +141,7 @@ function manageState(name) {
 async function predictVideo() {
     const now = performance.now();
     
+    // Auto-Resize Canvas
     if (canvas.width !== video.videoWidth) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -157,13 +157,14 @@ async function predictVideo() {
             if (results.faceLandmarks.length > 0) {
                 const landmarks = results.faceLandmarks[0];
                 
+                // --- POSE CHECK ---
                 if (!isFaceFrontal(landmarks)) {
                      drawBox(landmarks, "#FF4B4B", "LOOK STRAIGHT");
-                     manageState("Unknown"); // Reset if looking away
+                     manageState("Unknown"); 
                 } else {
                     const name = findMatch(landmarks);
 
-                    // Stability Buffer (Must see face for 1s before triggering)
+                    // --- TIMER LOGIC ---
                     if (name !== currentMatch) {
                         currentMatch = name;
                         matchStartTime = now;
@@ -171,12 +172,19 @@ async function predictVideo() {
 
                     const timeElapsed = now - matchStartTime;
                     const isUnknown = (currentMatch === "Unknown");
-                    const isVerified = (!isUnknown && timeElapsed > 1000); 
+                    
+                    // --- PRE-VERIFICATION (THE FIX) ---
+                    // If the URL already matches the face, we trust it instantly.
+                    const urlName = new URL(window.parent.location.href).searchParams.get("detected_name");
+                    const isPreVerified = (currentMatch === urlName && !isUnknown);
+                    
+                    // Verified if: Already verified OR Timer passed
+                    const isVerified = isPreVerified || (!isUnknown && timeElapsed > 1000); 
 
+                    // --- DRAW FIRST, THEN MANAGE STATE ---
                     if (isVerified) {
-                        // TRIGGER STATE CHANGE
-                        manageState(currentMatch);
                         drawBox(landmarks, "#00FF00", currentMatch);
+                        manageState(currentMatch); // This might reload the page
                     } else if (!isUnknown) {
                         drawBox(landmarks, "#FFFF00", "VERIFYING...");
                     } else {
