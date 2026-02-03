@@ -10,7 +10,7 @@ from datetime import datetime
 DB_FILE = "registered_faces.json"
 PKL_LOG = "attendance_data.pkl"
 
-st.set_page_config(page_title="Agnos", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Agnos Pro", layout="wide", initial_sidebar_state="expanded")
 
 # --- SESSION STATE ---
 if "db" not in st.session_state:
@@ -28,7 +28,6 @@ def save_log(name):
         with open(PKL_LOG,"rb") as f: logs = pickle.load(f)
     
     today = datetime.now().strftime("%Y-%m-%d")
-    # Prevent duplicate logging for the same day
     if not any(e['Name'] == name and e['Date'] == today for e in logs):
         entry = {"Name": name, "Time": datetime.now().strftime("%H:%M:%S"), "Date": today}
         logs.append(entry)
@@ -36,7 +35,7 @@ def save_log(name):
         return True
     return False
 
-# Check for auto-triggered attendance
+# Auto-Attendance Check
 if "detected_name" in st.query_params:
     det_name = st.query_params["detected_name"]
     if det_name and det_name != "Unknown":
@@ -48,10 +47,7 @@ if "detected_name" in st.query_params:
 # --- CSS STYLING ---
 st.markdown("""
 <style>
-    /* Global Styles */
     body { background:#0e1117; color:#fff; font-family: sans-serif; }
-    
-    /* Video Container */
     #view { 
         position: relative; 
         width: 100%; 
@@ -62,25 +58,14 @@ st.markdown("""
         border: 1px solid #333; 
         box-shadow: 0 4px 12px rgba(0,0,0,0.5);
     }
-    
-    /* Status Overlay */
     .status-overlay {
-        position: absolute;
-        top: 20px;
-        right: 20px;
-        background: rgba(0,0,0,0.7);
-        padding: 10px 20px;
-        border-radius: 8px;
-        border-left: 4px solid #333;
-        color: #fff;
-        font-weight: bold;
-        backdrop-filter: blur(4px);
-        transition: all 0.3s ease;
+        position: absolute; top: 20px; right: 20px;
+        background: rgba(0,0,0,0.7); padding: 10px 20px;
+        border-radius: 8px; border-left: 4px solid #333;
+        color: #fff; backdrop-filter: blur(4px);
     }
     .status-success { border-color: #00FF00; box-shadow: 0 0 15px rgba(0,255,0,0.2); }
     .status-scan { border-color: #0088FF; }
-    
-    /* Hidden elements */
     .stDeployButton {display:none;}
 </style>
 """, unsafe_allow_html=True)
@@ -106,7 +91,7 @@ let currentMatch = "Unknown";
 let matchStartTime = 0;
 let isLocked = false;
 
-// --- MATH: Aspect Ratio Corrected Cosine Similarity ---
+// --- MATH: Vector Geometry ---
 
 function magnitude(vec) {
     let sum = 0;
@@ -124,38 +109,40 @@ function cosineSimilarity(vecA, vecB) {
     return dotProduct(vecA, vecB) / (magnitude(vecA) * magnitude(vecB));
 }
 
-// Extract a dense feature vector (42 points)
-// We normalize coordinates to be Aspect-Ratio Independent
-function getFaceVector(landmarks, width, height) {
+// THE "FINGERPRINT" GENERATOR
+// We select 42 rigid points that define the skull structure
+// This is device-agnostic because it uses internal ratios
+function getFaceVector(landmarks) {
     // 1. Center Centroid
-    let cx = 0, cy = 0;
-    for(let p of landmarks) { cx += p.x; cy += p.y; }
-    cx /= landmarks.length;
-    cy /= landmarks.length;
+    let cx = 0, cy = 0, cz = 0;
+    for(let p of landmarks) { cx+=p.x; cy+=p.y; cz+=p.z; }
+    cx/=landmarks.length; cy/=landmarks.length; cz/=landmarks.length;
 
-    // 2. Aspect Ratio Correction factor
-    // We treat the image as if it's a 1:1 square to fix "squashed" faces
-    const ratio = width / height;
+    // 2. Select Rigid Points (Brows, Nose Bridge, Eye Corners)
+    // We avoid Mouth and Jaw points as they move too much
+    const indices = [
+        10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 
+        397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 
+        172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+    ];
 
     const vec = [];
-    for(let p of landmarks) {
-        // Correct X by aspect ratio so shape is true-to-life
-        const x_rel = (p.x - cx) * ratio; 
-        const y_rel = (p.y - cy);
-        vec.push(x_rel, y_rel);
+    for(let i of indices) {
+        // Create a vector from Centroid to each point
+        // This captures the "Shape" of the face relative to its center
+        vec.push(landmarks[i].x - cx);
+        vec.push(landmarks[i].y - cy);
+        vec.push(landmarks[i].z - cz);
     }
     return vec;
 }
 
-function findMatch(landmarks, width, height) {
-    const currentVec = getFaceVector(landmarks, width, height);
+function findMatch(landmarks) {
+    const currentVec = getFaceVector(landmarks);
     let bestMatch = { name: "Unknown", score: -1.0 };
 
     for (const [name, savedLandmarks] of Object.entries(registry)) {
-        // Saved landmarks are stored raw, so we process them with CURRENT aspect ratio 
-        // to ensure apples-to-apples comparison if possible, or assume standard 1.0
-        // Actually, better to store normalized raw and process both same way.
-        const savedVec = getFaceVector(savedLandmarks, width, height);
+        const savedVec = getFaceVector(savedLandmarks);
         const sim = cosineSimilarity(currentVec, savedVec);
         
         if (sim > bestMatch.score) {
@@ -163,7 +150,8 @@ function findMatch(landmarks, width, height) {
         }
     }
     
-    // Threshold (0.985 is a safe bet for cosine sim of shapes)
+    // Threshold: 0.99 is very strict (Identity)
+    // 0.985 allows slight rotation
     if (bestMatch.score > 0.985) return bestMatch.name;
     return "Unknown";
 }
@@ -184,12 +172,10 @@ async function init() {
         staticImg.onload = async () => {
             const results = await faceLandmarker.detect(staticImg);
             if (results.faceLandmarks.length > 0) {
-                // Return RAW landmarks for storage
                 const dataStr = btoa(JSON.stringify(results.faceLandmarks[0]));
                 const url = new URL(window.parent.location.href);
                 url.searchParams.set("face_data", dataStr);
                 window.parent.history.replaceState({}, "", url);
-                // Auto-click hidden button to notify Streamlit
                 if(triggerBtn) triggerBtn.click(); 
             }
         }
@@ -214,42 +200,46 @@ async function predictVideo() {
 
         if (results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
-            const name = findMatch(landmarks, canvas.width, canvas.height);
+            
+            // DRAW MESH (Visual Feedback)
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "rgba(0, 255, 255, 0.3)";
+            for(let i=0; i<landmarks.length; i+=10) { // Draw sparse mesh
+                 const x = landmarks[i].x * canvas.width;
+                 const y = landmarks[i].y * canvas.height;
+                 ctx.beginPath(); ctx.arc(x,y,1,0,2*Math.PI); ctx.stroke();
+            }
 
-            // --- STABILITY LOGIC ---
+            const name = findMatch(landmarks);
+
+            // --- STABILITY & LOGGING ---
             if (name !== currentMatch) {
                 currentMatch = name;
                 matchStartTime = now;
                 isLocked = false;
             }
 
-            // Must hold match for 0.5s to confirm (Anti-flicker)
             if (currentMatch !== "Unknown" && (now - matchStartTime > 500) && !isLocked) {
                 isLocked = true;
-                // Update URL without reload
                 const url = new URL(window.parent.location.href);
                 url.searchParams.set("detected_name", currentMatch);
                 window.parent.history.replaceState({}, "", url);
-                // Trigger Streamlit Rerun via hidden button
                 if(triggerBtn) triggerBtn.click();
             }
 
-            // --- RENDER ---
+            // --- BOUNDING BOX ---
             const xs = landmarks.map(p => p.x * canvas.width);
             const ys = landmarks.map(p => p.y * canvas.height);
             const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
             
-            const color = currentMatch === "Unknown" ? "rgba(255, 0, 0, 0.5)" : "rgba(0, 255, 0, 0.5)";
-            const stroke = currentMatch === "Unknown" ? "#FF0000" : "#00FF00";
+            const color = currentMatch === "Unknown" ? "#FF0000" : "#00FF00";
             
-            // Fancy Corners
-            ctx.strokeStyle = stroke;
-            ctx.lineWidth = 4;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
             ctx.strokeRect(x, y, w, h);
             
-            // Name Tag
             if (currentMatch !== "Unknown") {
-                ctx.fillStyle = stroke;
+                ctx.fillStyle = color;
                 ctx.fillRect(x, y - 30, w, 30);
                 ctx.fillStyle = "#000";
                 ctx.font = "bold 16px sans-serif";
@@ -268,7 +258,6 @@ def get_component_html(img_b64=None):
     db_json = json.dumps(st.session_state.db)
     img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
     
-    # We add a hidden button that JS can click to force a Streamlit update
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -333,12 +322,10 @@ with tab_scan:
     c_vid, c_stat = st.columns([2, 1])
     
     with c_vid:
-        # Render the component
         st.components.v1.html(get_component_html(), height=480)
 
     with c_stat:
         st.subheader("Live Status")
-        # Python Logic to display status based on URL param
         if "detected_name" in st.query_params:
             det = st.query_params["detected_name"]
             st.markdown(f"""
@@ -363,7 +350,6 @@ with tab_reg:
     
     c1, c2 = st.columns([2, 1])
     with c1:
-        # Dynamic key clears input after save
         name_in = st.text_input("Full Name", key=f"n_{st.session_state.uploader_key}").upper()
         file_in = st.file_uploader("Profile Photo", type=['jpg','png'], key=f"u_{st.session_state.uploader_key}")
     
@@ -371,19 +357,14 @@ with tab_reg:
         if file_in:
             st.image(file_in, width=200, caption="Preview")
             b64 = base64.b64encode(file_in.getvalue()).decode()
-            
-            # Invisible processor
             st.components.v1.html(get_component_html(b64), height=0, width=0)
             
-            # Logic
             if "face_data" in st.query_params:
                 if st.button("✅ Confirm Save", type="primary", use_container_width=True):
-                    # Save
                     data = json.loads(base64.b64decode(st.query_params["face_data"]).decode())
                     st.session_state.db[name_in] = data
                     with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f)
                     
-                    # Reset
                     st.session_state.uploader_key += 1
                     st.query_params.clear()
                     st.toast(f"Registered {name_in}!")
