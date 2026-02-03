@@ -114,7 +114,6 @@ def get_component_html(img_b64=None):
                         .replace("{'block' if img_b64 else 'none'}", display_img)
 
 # --- 6. LOGIC TRIGGER ---
-# --- 7. UI FEEDBACK TRIGGER ---
 qp = st.query_params
 if "detected_name" in qp:
     det_name = qp["detected_name"]
@@ -208,19 +207,16 @@ else:
         c1, c2 = st.columns([2,1])
         with c1: st.components.v1.html(get_component_html(), height=530)
         with c2:
-            st.subheader("Live Feed")
+            st.subheader("Live Status")
             if "detected_name" in st.query_params:
                 det = st.query_params["detected_name"]
-                ts = float(st.query_params.get("ts", 0))
-                if time.time() * 1000 - ts > 3000:
-                    st.query_params.clear()
-                    st.rerun()
-                else:
-                    st.success("**ACCESS GRANTED**")
-                    st.markdown(f"# {det}")
-                    st.caption(f"Logged: {st.query_params.get('c_time','')}")
+                st.success("**ACCESS GRANTED**")
+                st.markdown(f"# {det}")
+                if "c_time" in st.query_params:
+                    st.caption(f"Logged: {st.query_params['c_time']}")
             else:
                 st.info("System Active")
+                st.markdown("*Waiting for personnel...*")
     
     with tab2:
         c1, c2 = st.columns([2,1])
