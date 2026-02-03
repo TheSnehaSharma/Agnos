@@ -5,7 +5,7 @@ import os
 import pickle
 from insightface.app import FaceAnalysis
 from datetime import datetime
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, ClientSettings
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 # ================= CONFIG =================
 DB_FOLDER = "registered_faces"
@@ -88,10 +88,8 @@ if page == "Live Scanner":
     webrtc_streamer(
         key="biometric",
         video_transformer_factory=FaceRecognizer,
-        client_settings=ClientSettings(
-            media_stream_constraints={"video": True, "audio": False},
-            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        ),
+        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         video_html_attrs={"style": "width:100%; height:auto;"},
     )
 
