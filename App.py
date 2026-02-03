@@ -114,6 +114,7 @@ def get_component_html(img_b64=None):
                         .replace("{'block' if img_b64 else 'none'}", display_img)
 
 # --- 6. LOGIC TRIGGER ---
+# --- 7. UI FEEDBACK TRIGGER ---
 qp = st.query_params
 if "detected_name" in qp:
     det_name = qp["detected_name"]
@@ -125,14 +126,16 @@ if "detected_name" in qp:
         # 1. Try to Save
         saved_new = save_log(det_name, c_date, c_time)
         
-        # 2. Check Memory (is this an existing user?)
-        is_known = det_name in st.session_state.logged_set
-
-        # 3. Feedback
+        # 2. Feedback (Always show if present in URL)
         if saved_new:
             st.toast(f"✅ Attendance Marked: {det_name}", icon="⚡")
-        elif is_known:
+        else:
+            # If already saved, show "Welcome Back"
             st.toast(f"👋 Welcome back: {det_name}", icon="👀")
+
+    # Note: We do NOT clear query_params here. 
+    # We let the JS clear them when the user walks away.
+    # This keeps the "Toast" visible as long as the user stands there.
             
 # --- 7. UI ---
 if not st.session_state.auth_status:
