@@ -8,10 +8,9 @@ const video = document.getElementById("webcam");
 const staticImg = document.getElementById("static-img");
 const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
-const triggerBtn = document.getElementById("trigger-btn");
 const logger = document.getElementById("status-log");
 
-// INJECTED PYTHON VARIABLES
+// INJECTED VARIABLES
 const staticImgSrc = "STATIC_IMG_PLACEHOLDER";
 const runMode = "RUN_MODE_PLACEHOLDER";
 const registry = JSON.parse('DB_JSON_PLACEHOLDER');
@@ -20,18 +19,17 @@ let faceLandmarker;
 let lastVideoTime = -1;
 let currentMatch = "Unknown";
 let matchStartTime = 0;
-let lastTriggerTime = 0; // NEW: Controls the heartbeat frequency
+let lastTriggerTime = 0;
 
 function log(msg) {
     if(logger) logger.innerText = "SYSTEM: " + msg;
 }
 
-// --- 3D GEOMETRY ---
+// --- MATH & LOGIC ---
 function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
-// Pose Guard
 function isFaceFrontal(landmarks) {
     const nose = landmarks[1];
     const leftEar = landmarks[234];
@@ -42,7 +40,6 @@ function isFaceFrontal(landmarks) {
     return ratio > 0.5; 
 }
 
-// 14-Point Invariant Vector
 function getFaceVector(landmarks) {
     const P = (idx) => landmarks[idx]; 
     const eyeDist = getDist3D(P(468), P(473)); 
@@ -75,7 +72,7 @@ function findMatch(landmarks) {
 }
 
 async function init() {
-    log("Loading AI Models...");
+    log("Loading AI...");
     try {
         const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
         faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
@@ -86,36 +83,57 @@ async function init() {
             runningMode: runMode,
             numFaces: 1
         });
-        log("Model Ready.");
+        log("Ready.");
 
         if (staticImgSrc !== "null") {
             staticImg.src = staticImgSrc;
             staticImg.onload = async () => {
-                log("Analyzing Image...");
                 const results = await faceLandmarker.detect(staticImg);
                 if (results.faceLandmarks.length > 0) {
                     const dataStr = btoa(JSON.stringify(results.faceLandmarks[0]));
                     const url = new URL(window.parent.location.href);
                     url.searchParams.set("face_data", dataStr);
                     window.parent.history.replaceState({}, "", url);
-                    if(triggerBtn) triggerBtn.click();
-                    log("Analysis Complete.");
-                } else {
-                    log("No Face Detected.");
+                    sendSignal(Date.now()); // Send unique signal
                 }
             }
         } else {
-            log("Starting Camera...");
             const stream = await navigator.mediaDevices.getUserMedia({ video: true });
             video.srcObject = stream;
             video.addEventListener("loadeddata", () => {
-                log("Camera Active.");
+                log("Active.");
                 predictVideo();
             });
         }
     } catch (err) {
-        log("ERROR: " + err.message);
+        log("ERR: " + err.message);
     }
+}
+
+// --- SIGNAL SENDER (THE FIX) ---
+function sendSignal(uniqueValue) {
+    // 1. Update URL so Python can read the Name
+    const url = new URL(window.parent.location.href);
+    // If we are triggering, we assume currentMatch is valid.
+    if(currentMatch !== "Unknown") {
+        url.searchParams.set("detected_name", currentMatch);
+        
+        const d = new Date();
+        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
+        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
+        
+        url.searchParams.set("c_date", dateStr);
+        url.searchParams.set("c_time", timeStr);
+        url.searchParams.set("ts", uniqueValue); // Force URL change
+        window.parent.history.replaceState({}, "", url);
+    }
+
+    // 2. Send PostMessage with UNIQUE timestamp
+    // This forces Streamlit to re-run the script every single time
+    window.parent.postMessage({
+        type: 'streamlit:setComponentValue',
+        value: uniqueValue
+    }, '*');
 }
 
 async function predictVideo() {
@@ -136,14 +154,12 @@ async function predictVideo() {
             if (results.faceLandmarks.length > 0) {
                 const landmarks = results.faceLandmarks[0];
                 
-                // 1. Pose Guard
                 if (!isFaceFrontal(landmarks)) {
                      drawBox(landmarks, "#FF4B4B", "LOOK STRAIGHT");
                      currentMatch = "Unknown";
                 } else {
                     const name = findMatch(landmarks);
 
-                    // 2. State Machine
                     if (name !== currentMatch) {
                         currentMatch = name;
                         matchStartTime = now;
@@ -153,11 +169,11 @@ async function predictVideo() {
                     const isUnknown = (currentMatch === "Unknown");
                     const isVerified = (!isUnknown && timeElapsed > 1000); 
 
-                    // 3. RESPONSIVE TRIGGER LOGIC (The Fix)
-                    // If verified AND it has been > 2.5 seconds since last ping, ping again.
+                    // --- HEARTBEAT LOGIC ---
+                    // Every 2.5 seconds, if verified, send a signal.
                     if (isVerified && (now - lastTriggerTime > 2500)) {
-                        triggerPython(currentMatch);
-                        lastTriggerTime = now; // Reset timer
+                        sendSignal(Date.now()); // Send unique timestamp
+                        lastTriggerTime = now;
                         log("Verified: " + currentMatch);
                     }
                     
@@ -183,24 +199,6 @@ function drawBox(landmarks, color, text) {
     ctx.fillStyle = "#000"; ctx.font = "bold 16px sans-serif"; ctx.fillText(text, x + 5, y - 8);
 }
 
-function triggerPython(name) {
-    try {
-        const url = new URL(window.parent.location.href);
-        url.searchParams.set("detected_name", name);
-        
-        const d = new Date();
-        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
-        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
-        
-        url.searchParams.set("c_date", dateStr);
-        url.searchParams.set("c_time", timeStr);
-        url.searchParams.set("ts", Date.now()); // Forces python reload
-        
-        window.parent.history.replaceState({}, "", url);
-        if(triggerBtn) triggerBtn.click();
-    } catch(e) {}
-}
-
 init();
 </script>
 <style>
@@ -220,7 +218,6 @@ init();
         <video id="webcam" autoplay muted playsinline style="display: {'none' if img_b64 else 'block'}"></video>
         <img id="static-img" style="display: {'block' if img_b64 else 'none'}">
         <canvas id="overlay"></canvas>
-        <button id="trigger-btn" style="display:none;" onclick="window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'update'}, '*')"></button>
     </div>
 </body>
 </html>
