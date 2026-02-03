@@ -19,13 +19,12 @@ let faceLandmarker;
 let lastVideoTime = -1;
 let currentMatch = "Unknown";
 let matchStartTime = 0;
-let lastTriggerTime = 0;
 
 function log(msg) {
     if(logger) logger.innerText = "SYSTEM: " + msg;
 }
 
-// --- MATH & LOGIC ---
+// --- 3D MATH ---
 function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
@@ -93,8 +92,8 @@ async function init() {
                     const dataStr = btoa(JSON.stringify(results.faceLandmarks[0]));
                     const url = new URL(window.parent.location.href);
                     url.searchParams.set("face_data", dataStr);
+                    // For images, we just replace state (no reload needed usually)
                     window.parent.history.replaceState({}, "", url);
-                    sendSignal(Date.now()); // Send unique signal
                 }
             }
         } else {
@@ -110,30 +109,27 @@ async function init() {
     }
 }
 
-// --- SIGNAL SENDER (THE FIX) ---
-function sendSignal(uniqueValue) {
-    // 1. Update URL so Python can read the Name
+// --- THE FIX: FORCED NAVIGATION ---
+function triggerPython(name) {
     const url = new URL(window.parent.location.href);
-    // If we are triggering, we assume currentMatch is valid.
-    if(currentMatch !== "Unknown") {
-        url.searchParams.set("detected_name", currentMatch);
-        
-        const d = new Date();
-        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
-        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
-        
-        url.searchParams.set("c_date", dateStr);
-        url.searchParams.set("c_time", timeStr);
-        url.searchParams.set("ts", uniqueValue); // Force URL change
-        window.parent.history.replaceState({}, "", url);
-    }
+    const currentUrlName = url.searchParams.get("detected_name");
 
-    // 2. Send PostMessage with UNIQUE timestamp
-    // This forces Streamlit to re-run the script every single time
-    window.parent.postMessage({
-        type: 'streamlit:setComponentValue',
-        value: uniqueValue
-    }, '*');
+    // CRITICAL: Stop infinite loops. 
+    // Only reload if the URL doesn't already match the current face.
+    if (currentUrlName === name) return;
+
+    url.searchParams.set("detected_name", name);
+    
+    const d = new Date();
+    const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
+    const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
+    
+    url.searchParams.set("c_date", dateStr);
+    url.searchParams.set("c_time", timeStr);
+    url.searchParams.set("ts", Date.now()); 
+    
+    // FORCE PAGE RELOAD to wake up Python
+    window.parent.location.href = url.toString();
 }
 
 async function predictVideo() {
@@ -160,6 +156,7 @@ async function predictVideo() {
                 } else {
                     const name = findMatch(landmarks);
 
+                    // Stability Check (Must match for 1.2 seconds)
                     if (name !== currentMatch) {
                         currentMatch = name;
                         matchStartTime = now;
@@ -167,14 +164,12 @@ async function predictVideo() {
 
                     const timeElapsed = now - matchStartTime;
                     const isUnknown = (currentMatch === "Unknown");
-                    const isVerified = (!isUnknown && timeElapsed > 1000); 
+                    const isVerified = (!isUnknown && timeElapsed > 1200); 
 
-                    // --- HEARTBEAT LOGIC ---
-                    // Every 2.5 seconds, if verified, send a signal.
-                    if (isVerified && (now - lastTriggerTime > 2500)) {
-                        sendSignal(Date.now()); // Send unique timestamp
-                        lastTriggerTime = now;
-                        log("Verified: " + currentMatch);
+                    // TRIGGER: If verified, force Python to reload the page
+                    if (isVerified) {
+                        triggerPython(currentMatch);
+                        // Visual feedback handled by reload
                     }
                     
                     if (isVerified) drawBox(landmarks, "#00FF00", currentMatch);
