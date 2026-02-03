@@ -211,9 +211,9 @@ else:
             if "detected_name" in st.query_params:
                 det = st.query_params["detected_name"]
                 st.success("**ACCESS GRANTED**")
-                st.markdown(f"# {det}")
+                st.markdown(f"<h1 style='font-size:3em; color:#4ade80;'>{det}</h1>", unsafe_allow_html=True)
                 if "c_time" in st.query_params:
-                    st.caption(f"Logged: {st.query_params['c_time']}")
+                    st.caption(f"Last Scan: {st.query_params['c_time']}")
             else:
                 st.info("System Active")
                 st.markdown("*Waiting for personnel...*")
