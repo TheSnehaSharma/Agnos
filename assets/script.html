@@ -20,7 +20,7 @@ let faceLandmarker;
 let lastVideoTime = -1;
 let currentMatch = "Unknown";
 let matchStartTime = 0;
-let pendingLog = false;
+let lastTriggerTime = 0; // NEW: Controls the heartbeat frequency
 
 function log(msg) {
     if(logger) logger.innerText = "SYSTEM: " + msg;
@@ -31,7 +31,7 @@ function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
-// Pose Guard: Prevents matching if head is turned too far
+// Pose Guard
 function isFaceFrontal(landmarks) {
     const nose = landmarks[1];
     const leftEar = landmarks[234];
@@ -39,13 +39,13 @@ function isFaceFrontal(landmarks) {
     const distL = getDist3D(nose, leftEar);
     const distR = getDist3D(nose, rightEar);
     const ratio = Math.min(distL, distR) / Math.max(distL, distR);
-    return ratio > 0.5; // True if facing forward
+    return ratio > 0.5; 
 }
 
 // 14-Point Invariant Vector
 function getFaceVector(landmarks) {
     const P = (idx) => landmarks[idx]; 
-    const eyeDist = getDist3D(P(468), P(473)); // Anchor
+    const eyeDist = getDist3D(P(468), P(473)); 
     const features = [
         [1, 4], [1, 61], [1, 291], [61, 291], [33, 133], [263, 362], 
         [1, 152], [10, 152], [234, 454], [1, 468], [1, 473], 
@@ -70,7 +70,6 @@ function findMatch(landmarks) {
         if (score < bestMatch.score) bestMatch = { name: name, score: score };
     }
     
-    // Strict Threshold for 14-point vector
     if (bestMatch.score < 0.65) return bestMatch.name;
     return "Unknown";
 }
@@ -122,7 +121,6 @@ async function init() {
 async function predictVideo() {
     const now = performance.now();
     
-    // Resize canvas fix
     if (canvas.width !== video.videoWidth) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -142,7 +140,6 @@ async function predictVideo() {
                 if (!isFaceFrontal(landmarks)) {
                      drawBox(landmarks, "#FF4B4B", "LOOK STRAIGHT");
                      currentMatch = "Unknown";
-                     pendingLog = true;
                 } else {
                     const name = findMatch(landmarks);
 
@@ -150,18 +147,18 @@ async function predictVideo() {
                     if (name !== currentMatch) {
                         currentMatch = name;
                         matchStartTime = now;
-                        pendingLog = true;
                     }
 
                     const timeElapsed = now - matchStartTime;
                     const isUnknown = (currentMatch === "Unknown");
                     const isVerified = (!isUnknown && timeElapsed > 1000); 
 
-                    // 3. Logic & Drawing
-                    if (isVerified && pendingLog) {
+                    // 3. RESPONSIVE TRIGGER LOGIC (The Fix)
+                    // If verified AND it has been > 2.5 seconds since last ping, ping again.
+                    if (isVerified && (now - lastTriggerTime > 2500)) {
                         triggerPython(currentMatch);
-                        pendingLog = false; // Prevent spam
-                        log("Logged: " + currentMatch);
+                        lastTriggerTime = now; // Reset timer
+                        log("Verified: " + currentMatch);
                     }
                     
                     if (isVerified) drawBox(landmarks, "#00FF00", currentMatch);
@@ -169,15 +166,9 @@ async function predictVideo() {
                     else drawBox(landmarks, "#FF0000", "UNKNOWN");
                 }
             } else {
-                // Reset if face lost
-                if(currentMatch !== "Unknown") {
-                    currentMatch = "Unknown";
-                    pendingLog = true;
-                }
+                if(currentMatch !== "Unknown") currentMatch = "Unknown";
             }
-        } catch (e) {
-             // Silent fail to keep loop alive
-        }
+        } catch (e) {}
     }
     window.requestAnimationFrame(predictVideo);
 }
@@ -197,14 +188,13 @@ function triggerPython(name) {
         const url = new URL(window.parent.location.href);
         url.searchParams.set("detected_name", name);
         
-        // Client Time
         const d = new Date();
         const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
         const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
         
         url.searchParams.set("c_date", dateStr);
         url.searchParams.set("c_time", timeStr);
-        url.searchParams.set("ts", Date.now()); 
+        url.searchParams.set("ts", Date.now()); // Forces python reload
         
         window.parent.history.replaceState({}, "", url);
         if(triggerBtn) triggerBtn.click();
@@ -217,6 +207,11 @@ init();
     body { margin:0; background:black; overflow:hidden; }
     #view { position:relative; width:100%; height:100vh; }
     video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:contain; }
+    #status-log {
+        position: absolute; top: 10px; left: 10px; z-index: 20;
+        color: #00FF00; background: rgba(0,0,0,0.7); padding: 5px 10px;
+        border-radius: 4px; font-size: 12px; font-family: monospace; pointer-events: none;
+    }
 </style>
 </head>
 <body>
