@@ -20,12 +20,9 @@ if "identity" not in st.session_state:
 # ================= AI ENGINE =================
 @st.cache_resource
 def load_engine():
-    app = FaceAnalysis(
-        name="buffalo_s",
-        providers=["CPUExecutionProvider"]
-    )
-    app.prepare(ctx_id=0, det_size=(320, 320))
-    return app
+    engine = FaceAnalysis(name="buffalo_s", providers=["CPUExecutionProvider"])
+    engine.prepare(ctx_id=0, det_size=(320, 320))
+    return engine
 
 @st.cache_resource
 def load_face_db():
@@ -41,7 +38,7 @@ def load_face_db():
                 db[f.split(".")[0]] = faces[0].normed_embedding
     return db
 
-# ================= NAV =================
+# ================= NAVIGATION =================
 page = st.sidebar.radio(
     "Navigation",
     ["Live Scanner", "Register Face", "Manage Registered Faces"]
@@ -51,135 +48,84 @@ page = st.sidebar.radio(
 # ======================= LIVE SCANNER ====================
 # =========================================================
 if page == "Live Scanner":
+    st.header("📹 Live Biometric Scanner")
 
-    JS_BRIDGE = r"""
-    <style>
-    html, body { margin:0; padding:0; background:black; }
-    </style>
-
-    <div style="position:relative;width:100vw;height:100vh;">
-      <video id="v" autoplay playsinline
-        style="width:100%;height:100%;object-fit:cover;"></video>
-      <canvas id="o"
-        style="position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
+    # HTML + JS to stream camera feed and send base64 image to Streamlit
+    JS = """
+    <video autoplay playsinline id="video" style="width:100%;height:100%;object-fit:cover;"></video>
     <script>
-    const NAME = "{{NAME}}";
-    const SCORE = "{{SCORE}}";
-
-    const v = document.getElementById("v");
-    const o = document.getElementById("o");
-    const ctx = o.getContext("2d");
-    const c = document.createElement("canvas");
-    const cctx = c.getContext("2d");
-
-    const fd = new FaceDetection({
-      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${f}`
-    });
-    fd.setOptions({ model:"short", minDetectionConfidence:0.7 });
-
-    fd.onResults(r => {
-      o.width = o.clientWidth;
-      o.height = o.clientHeight;
-      ctx.clearRect(0,0,o.width,o.height);
-
-      if (!r.detections.length) return;
-
-      const b = r.detections[0].boundingBox;
-      const x = b.xCenter*o.width - b.width*o.width/2;
-      const y = b.yCenter*o.height - b.height*o.height/2;
-      const w = b.width*o.width;
-      const h = b.height*o.height;
-
-      ctx.strokeStyle = "#00ff00";
-      ctx.lineWidth = 3;
-      ctx.strokeRect(x,y,w,h);
-
-      ctx.fillStyle = "#00ff00";
-      ctx.font = "18px monospace";
-      ctx.fillText(`${NAME} (${SCORE}%)`, x, y-10);
-
-      const vw = v.videoWidth;
-      const vh = v.videoHeight;
-
-      const cw = b.width * 2 * vw;
-      const ch = b.height * 2 * vh;
-      const cx = b.xCenter * vw - cw/2;
-      const cy = b.yCenter * vh - ch/2;
-
-      c.width = 160;
-      c.height = 160;
-      cctx.drawImage(v, cx, cy, cw, ch, 0, 0, 160, 160);
-
-      if (window.Streamlit) {
-        Streamlit.setComponentValue(
-          c.toDataURL("image/jpeg", 0.6)
-        );
-      }
-    });
-
+    const video = document.getElementById('video');
     navigator.mediaDevices.getUserMedia({video:true})
-    .then(s=>{
-      v.srcObject=s;
-      async function loop(){
-        await fd.send({image:v});
-        setTimeout(loop, 900);
-      }
-      loop();
-    });
+      .then(stream => { video.srcObject = stream; });
+
+    const canvas = document.createElement('canvas');
+    setInterval(() => {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video,0,0);
+        if(window.Streamlit){
+            Streamlit.setComponentValue(canvas.toDataURL('image/jpeg',0.8));
+        }
+    }, 500);
     </script>
     """
+    img_data = st.components.v1.html(JS, height=600)
 
-    html = JS_BRIDGE \
-        .replace("{{NAME}}", st.session_state.identity) \
-        .replace("{{SCORE}}", str(st.session_state.score))
-
-    img_data = st.components.v1.html(html, height=800)
-
+    # ---------------- Process frame in Python ----------------
     if isinstance(img_data, str) and img_data.startswith("data:image"):
-        frame = cv2.imdecode(
-            np.frombuffer(
-                base64.b64decode(img_data.split(",")[1]),
-                np.uint8
-            ),
-            cv2.IMREAD_COLOR
-        )
+        encoded = img_data.split(",")[1]
+        nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        faces = load_engine().get(frame)
+        engine = load_engine()
+        faces = engine.get(frame)
+
         if faces:
             emb = faces[0].normed_embedding
-            best, score = "UNKNOWN", 0.0
+            db = load_face_db()
+            best_name, best_score = "UNKNOWN", 0.0
 
-            for name, ref in load_face_db().items():
-                s = float(np.dot(emb, ref))
-                if s > score:
-                    best, score = name, s
+            for name, ref in db.items():
+                sim = float(np.dot(emb, ref))
+                if sim > best_score:
+                    best_name, best_score = name, sim
 
-            if score >= SIM_THRESHOLD:
-                st.session_state.identity = best
-                st.session_state.score = int(score * 100)
+            if best_score >= SIM_THRESHOLD:
+                st.session_state.identity = best_name
+                st.session_state.score = int(best_score * 100)
             else:
                 st.session_state.identity = "UNKNOWN"
-                st.session_state.score = int(score * 100)
+                st.session_state.score = int(best_score * 100)
+
+            # Draw rectangle + name over face for display
+            for f in faces:
+                bbox = f.bbox.astype(int)  # [x1,y1,x2,y2]
+                cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]),
+                              (0,255,0), 2)
+                cv2.putText(frame,
+                            f"{st.session_state.identity} ({st.session_state.score}%)",
+                            (bbox[0], bbox[1]-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+
+            st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_column_width=True)
+        else:
+            st.info("No face detected...")
 
 # =========================================================
 # ===================== REGISTER FACE =====================
 # =========================================================
 elif page == "Register Face":
-
     st.header("👤 Register New Face")
 
     name = st.text_input("Full Name").upper().strip()
-    img = st.file_uploader("Upload face image", ["jpg","png","jpeg"])
+    img_file = st.file_uploader("Upload face image", ["jpg","png","jpeg"])
 
     if st.button("Register"):
-        if not name or not img:
-            st.error("Provide name and image")
+        if not name or not img_file:
+            st.error("Please provide name and image.")
         else:
             with open(os.path.join(DB_FOLDER, f"{name}.jpg"), "wb") as f:
-                f.write(img.getbuffer())
+                f.write(img_file.getbuffer())
             st.cache_resource.clear()
             st.success(f"Registered {name}")
 
@@ -187,13 +133,9 @@ elif page == "Register Face":
 # ================= MANAGE REGISTERED FACES ===============
 # =========================================================
 elif page == "Manage Registered Faces":
-
     st.header("🗂️ Manage Registered Faces")
 
-    files = [
-        f for f in os.listdir(DB_FOLDER)
-        if f.lower().endswith((".jpg",".png",".jpeg"))
-    ]
+    files = [f for f in os.listdir(DB_FOLDER) if f.lower().endswith((".jpg",".png",".jpeg"))]
 
     if not files:
         st.info("No registered faces.")
@@ -204,4 +146,4 @@ elif page == "Manage Registered Faces":
             if col2.button("Delete", key=f):
                 os.remove(os.path.join(DB_FOLDER, f))
                 st.cache_resource.clear()
-                st.rerun()
+                st.experimental_rerun()
