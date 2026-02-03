@@ -36,6 +36,7 @@ video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; 
 """
 
 # --- JS CODE with normalization and cosine similarity ---
+# --- JS CODE with Ratio-Based Biometrics ---
 JS_CODE = """
 <script type="module">
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
@@ -52,115 +53,138 @@ const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
 
-// --- Flatten landmarks ---
-function flattenLandmarks(landmarks){
-    const vec = [];
-    for(const p of landmarks) vec.push(p.x, p.y);
-    return vec;
+// --- Helper: Euclidean Distance between two landmarks ---
+function getDist(p1, p2) {
+    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
 }
 
-// --- Cosine similarity ---
-function cosineSimilarity(vecA, vecB){
-    let dot=0, normA=0, normB=0;
-    for(let i=0;i<vecA.length;i++){
-        dot += vecA[i]*vecB[i];
-        normA += vecA[i]*vecA[i];
-        normB += vecB[i]*vecB[i];
+// --- CORE LOGIC: Extract Invariant Ratios ---
+// We use landmarks: 468(L-Iris), 473(R-Iris), 1(NoseTip), 61(MouthL), 291(MouthR), 152(Chin), 234(L-Cheek), 454(R-Cheek)
+function getFaceRatios(landmarks) {
+    const leftIris = landmarks[468];
+    const rightIris = landmarks[473];
+    const noseTip = landmarks[1];
+    const mouthLeft = landmarks[61];
+    const mouthRight = landmarks[291];
+    const chin = landmarks[152];
+    const leftCheek = landmarks[234];
+    const rightCheek = landmarks[454];
+
+    // 1. The Anchor: Inter-Pupillary Distance (IPD)
+    // All other measurements are divided by this to make them scale-invariant.
+    const ipd = getDist(leftIris, rightIris);
+
+    // Midpoint between eyes (for vertical measurements)
+    const midEye = { x: (leftIris.x + rightIris.x)/2, y: (leftIris.y + rightIris.y)/2 };
+
+    // 2. Calculate Ratios
+    const ratioVector = [
+        getDist(noseTip, midEye) / ipd,      // Nose Length
+        getDist(mouthLeft, mouthRight) / ipd,// Mouth Width
+        getDist(chin, midEye) / ipd,         // Chin Drop (Face Length)
+        getDist(leftCheek, rightCheek) / ipd,// Face Width
+        getDist(noseTip, chin) / ipd         // Nose-to-Chin Dist
+    ];
+
+    return ratioVector;
+}
+
+// --- Compare Vectors (Manhattan Distance) ---
+// Returns a "Difference Score". Lower is better. 0.0 is exact match.
+function calculateDifference(vecA, vecB) {
+    let diff = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        diff += Math.abs(vecA[i] - vecB[i]);
     }
-    return dot / (Math.sqrt(normA)*Math.sqrt(normB));
-}
-
-// --- Normalize landmarks (center + scale by eye distance) ---
-function normalizeLandmarks(landmarks){
-    // bounding box center
-    const xs = landmarks.map(p=>p.x);
-    const ys = landmarks.map(p=>p.y);
-    const cx = (Math.min(...xs) + Math.max(...xs))/2;
-    const cy = (Math.min(...ys) + Math.max(...ys))/2;
-
-    // eyes distance
-    const leftEye = landmarks[33];
-    const rightEye = landmarks[263];
-    const eyeDist = Math.sqrt((rightEye.x-leftEye.x)**2 + (rightEye.y-leftEye.y)**2);
-
-    // normalize
-    const norm = landmarks.map(p=>({x:(p.x-cx)/eyeDist, y:(p.y-cy)/eyeDist}));
-    return norm;
+    return diff;
 }
 
 // --- Match face ---
-function findMatch(current){
-    const normCurrent = normalizeLandmarks(current);
-    const currentVec = flattenLandmarks(normCurrent);
-    let match = {name:"Unknown", conf:0};
-    for(const [name, saved] of Object.entries(registry)){
-        const normSaved = normalizeLandmarks(saved);
-        const savedVec = flattenLandmarks(normSaved);
-        const sim = cosineSimilarity(currentVec, savedVec);
-        const conf = Math.floor(sim*100);
-        if(sim>0.7 && conf>match.conf){ // threshold
-            match={name, conf};
+function findMatch(currentLandmarks) {
+    const currentVec = getFaceRatios(currentLandmarks);
+    let bestMatch = { name: "Unknown", score: 100 }; // High score = bad match
+
+    for (const [name, savedLandmarks] of Object.entries(registry)) {
+        const savedVec = getFaceRatios(savedLandmarks);
+        const diff = calculateDifference(currentVec, savedVec);
+        
+        // LOGIC: If difference is smaller than current best, update.
+        if (diff < bestMatch.score) {
+            bestMatch = { name: name, score: diff };
         }
     }
-    return match;
+
+    // --- THRESHOLD ---
+    // A difference of < 0.25 is usually the sweet spot for these specific ratios.
+    // 0.0 = Identical
+    // 0.15 = Very close
+    // 0.3+ = Different person
+    if (bestMatch.score < 0.25) {
+        return { name: bestMatch.name, conf: Math.floor((1 - bestMatch.score) * 100) }; 
+    } else {
+        return { name: "Unknown", conf: 0 };
+    }
 }
 
 // --- Init MediaPipe ---
-async function init(){
-    try{
+async function init() {
+    try {
         const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-        faceLandmarker = await FaceLandmarker.createFromOptions(vision,{
-            baseOptions:{
-                modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-                delegate:"GPU"
+        faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                delegate: "GPU"
             },
-            runningMode:runMode,
-            numFaces:1
+            runningMode: runMode,
+            numFaces: 1
         });
 
-        if(staticImgSrc!=="null"){
+        if (staticImgSrc !== "null") {
             staticImg.src = staticImgSrc;
-            staticImg.onload = async ()=>{
+            staticImg.onload = async () => {
                 const results = await faceLandmarker.detect(staticImg);
-                if(results.faceLandmarks && results.faceLandmarks.length>0){
+                if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                     const dataString = btoa(JSON.stringify(results.faceLandmarks[0]));
                     const url = new URL(window.parent.location.href);
                     url.searchParams.set("face_data", dataString);
                     window.parent.history.replaceState({}, "", url);
-                    window.parent.postMessage({type:'streamlit:setComponentValue', value:'READY'},"*");
+                    window.parent.postMessage({ type: 'streamlit:setComponentValue', value: 'READY' }, "*");
                 }
             }
-        }else{
-            const stream = await navigator.mediaDevices.getUserMedia({video:true});
+        } else {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
             video.srcObject = stream;
-            video.onloadeddata = ()=>predictVideo();
+            video.onloadeddata = () => predictVideo();
         }
-    }catch(err){ log.innerText="ERROR: "+err.message; }
+    } catch (err) { log.innerText = "ERROR: " + err.message; }
 }
 
 // --- Predict video frames ---
-async function predictVideo(){
+async function predictVideo() {
     const results = faceLandmarker.detectForVideo(video, performance.now());
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if(results.faceLandmarks && results.faceLandmarks.length>0){
+    if (results.faceLandmarks && results.faceLandmarks.length > 0) {
         const landmarks = results.faceLandmarks[0];
         const match = findMatch(landmarks);
 
-        const xs = landmarks.map(p=>p.x*canvas.width);
-        const ys = landmarks.map(p=>p.y*canvas.height);
-        const x = Math.min(...xs), y=Math.min(...ys), w=Math.max(...xs)-x, h=Math.max(...ys)-y;
+        // Draw Bounding Box
+        const xs = landmarks.map(p => p.x * canvas.width);
+        const ys = landmarks.map(p => p.y * canvas.height);
+        const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs) - x, h = Math.max(...ys) - y;
 
-        const color = match.name==="Unknown"?"#FF4B4B":"#00FF00";
-        ctx.strokeStyle=color; ctx.lineWidth=4; ctx.strokeRect(x,y,w,h);
-        ctx.fillStyle=color; ctx.fillRect(x,y-25,w,25);
-        ctx.fillStyle="white"; ctx.font="bold 14px monospace";
-        ctx.fillText(`${match.name} ${match.conf}%`, x+5, y-8);
+        const color = match.name === "Unknown" ? "#FF4B4B" : "#00FF00";
+        ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
+        ctx.fillStyle = color; ctx.fillRect(x, y - 25, w, 25);
+        ctx.fillStyle = "white"; ctx.font = "bold 14px monospace";
+        
+        // Show Name and "Error Score" (lower is better, but we show confidence)
+        ctx.fillText(`${match.name}`, x + 5, y - 8);
 
-        if(match.name!=="Unknown"){
+        if (match.name !== "Unknown") {
             const url = new URL(window.parent.location.href);
-            if(url.searchParams.get("detected")!==match.name){
+            if (url.searchParams.get("detected") !== match.name) {
                 url.searchParams.set("detected", match.name);
                 window.parent.history.replaceState({}, "", url);
             }
@@ -172,7 +196,6 @@ async function predictVideo(){
 init();
 </script>
 """
-
 # --- HTML component ---
 def get_component_html(img_b64=None):
     db_json = json.dumps(st.session_state.db)
