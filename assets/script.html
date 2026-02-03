@@ -24,7 +24,7 @@ function log(msg) {
     if(logger) logger.innerText = "SYSTEM: " + msg;
 }
 
-// --- 3D MATH ---
+// --- MATH ---
 function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
@@ -92,7 +92,6 @@ async function init() {
                     const dataStr = btoa(JSON.stringify(results.faceLandmarks[0]));
                     const url = new URL(window.parent.location.href);
                     url.searchParams.set("face_data", dataStr);
-                    // For images, we just replace state (no reload needed usually)
                     window.parent.history.replaceState({}, "", url);
                 }
             }
@@ -109,27 +108,35 @@ async function init() {
     }
 }
 
-// --- THE FIX: FORCED NAVIGATION ---
-function triggerPython(name) {
+// --- STATE LOCK LOGIC ---
+function manageState(name) {
     const url = new URL(window.parent.location.href);
-    const currentUrlName = url.searchParams.get("detected_name");
+    const urlName = url.searchParams.get("detected_name");
 
-    // CRITICAL: Stop infinite loops. 
-    // Only reload if the URL doesn't already match the current face.
-    if (currentUrlName === name) return;
+    // 1. If what we see (name) matches what URL says (urlName), DO NOTHING.
+    // This stabilizes the system and prevents infinite reloads.
+    if (name === urlName) return;
 
-    url.searchParams.set("detected_name", name);
-    
-    const d = new Date();
-    const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
-    const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
-    
-    url.searchParams.set("c_date", dateStr);
-    url.searchParams.set("c_time", timeStr);
-    url.searchParams.set("ts", Date.now()); 
-    
-    // FORCE PAGE RELOAD to wake up Python
-    window.parent.location.href = url.toString();
+    // 2. If name changed (e.g. Unknown -> John, or John -> Unknown)
+    if (name === "Unknown") {
+        // Silently clear URL so Python stops showing the Toast
+        url.searchParams.delete("detected_name");
+        url.searchParams.delete("c_date");
+        url.searchParams.delete("c_time");
+        window.parent.history.replaceState({}, "", url);
+    } else {
+        // We found a new person! Update URL and FORCE RELOAD to notify Python.
+        url.searchParams.set("detected_name", name);
+        
+        const d = new Date();
+        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
+        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
+        
+        url.searchParams.set("c_date", dateStr);
+        url.searchParams.set("c_time", timeStr);
+        
+        window.parent.location.href = url.toString();
+    }
 }
 
 async function predictVideo() {
@@ -152,11 +159,11 @@ async function predictVideo() {
                 
                 if (!isFaceFrontal(landmarks)) {
                      drawBox(landmarks, "#FF4B4B", "LOOK STRAIGHT");
-                     currentMatch = "Unknown";
+                     manageState("Unknown"); // Reset if looking away
                 } else {
                     const name = findMatch(landmarks);
 
-                    // Stability Check (Must match for 1.2 seconds)
+                    // Stability Buffer (Must see face for 1s before triggering)
                     if (name !== currentMatch) {
                         currentMatch = name;
                         matchStartTime = now;
@@ -164,20 +171,22 @@ async function predictVideo() {
 
                     const timeElapsed = now - matchStartTime;
                     const isUnknown = (currentMatch === "Unknown");
-                    const isVerified = (!isUnknown && timeElapsed > 1200); 
+                    const isVerified = (!isUnknown && timeElapsed > 1000); 
 
-                    // TRIGGER: If verified, force Python to reload the page
                     if (isVerified) {
-                        triggerPython(currentMatch);
-                        // Visual feedback handled by reload
+                        // TRIGGER STATE CHANGE
+                        manageState(currentMatch);
+                        drawBox(landmarks, "#00FF00", currentMatch);
+                    } else if (!isUnknown) {
+                        drawBox(landmarks, "#FFFF00", "VERIFYING...");
+                    } else {
+                        drawBox(landmarks, "#FF0000", "UNKNOWN");
+                        manageState("Unknown");
                     }
-                    
-                    if (isVerified) drawBox(landmarks, "#00FF00", currentMatch);
-                    else if (!isUnknown) drawBox(landmarks, "#FFFF00", "VERIFYING...");
-                    else drawBox(landmarks, "#FF0000", "UNKNOWN");
                 }
             } else {
-                if(currentMatch !== "Unknown") currentMatch = "Unknown";
+                currentMatch = "Unknown";
+                manageState("Unknown");
             }
         } catch (e) {}
     }
