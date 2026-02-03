@@ -1,10 +1,7 @@
 streamlit
-streamlit-javascript
-streamlit-js-eval
-pako
+streamlit-webrtc==0.64.5
 opencv-python-headless
 numpy
 pandas
 av
 insightface
-onnxruntime
