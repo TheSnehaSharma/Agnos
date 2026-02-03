@@ -13,25 +13,27 @@ import streamlit.components.v1 as components
 DB_FOLDER = "registered_faces"
 PKL_LOG = "attendance_data.pkl"
 
-if not os.path.exists(DB_FOLDER):
-    os.makedirs(DB_FOLDER)
+for folder in [DB_FOLDER]:
+    if not os.path.exists(folder):
+        os.makedirs(folder)
 
-st.set_page_config(page_title="Iron-Vision Edge Pro", layout="wide")
+st.set_page_config(page_title="Iron-Vision Biometric", layout="wide")
 
-# --- 2. AI ENGINE ---
+# --- 2. AI ENGINE (Cached) ---
 @st.cache_resource
 def load_ai():
     app = FaceAnalysis(name='buffalo_s', providers=['CPUExecutionProvider'])
-    app.prepare(ctx_id=0, det_size=(320, 320)) 
+    app.prepare(ctx_id=0, det_size=(320, 320))
     return app
 
 @st.cache_resource
 def load_face_db():
     engine = load_ai()
     db = {}
+    valid_extensions = ('.jpg', '.png', '.jpeg')
     if os.path.exists(DB_FOLDER):
         for file in os.listdir(DB_FOLDER):
-            if file.lower().endswith(('.jpg', '.png', '.jpeg')):
+            if file.lower().endswith(valid_extensions):
                 img = cv2.imread(os.path.join(DB_FOLDER, file))
                 if img is not None:
                     faces = engine.get(img)
@@ -39,27 +41,26 @@ def load_face_db():
                         db[file.split('.')[0]] = faces[0].normed_embedding
     return db
 
-# --- 3. THE RE-ENGINEERED JS BRIDGE ---
+# --- 3. THE 2X CROP BRIDGE (Cloud Optimized) ---
 JS_BRIDGE = """
-<div style="position: relative; width: 100%; max-width: 400px; margin: auto; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 4/3;">
+<div style="position: relative; width: 100%; max-width: 400px; margin: auto; background: #000; border-radius: 15px; overflow: hidden; aspect-ratio: 4/3;">
     <video id="v" autoplay playsinline style="width: 100%; height: 100%; transform: scaleX(-1); object-fit: contain;"></video>
     <canvas id="overlay" width="400" height="300" style="position: absolute; top: 0; left: 0; transform: scaleX(-1); width: 100%; height: 100%;"></canvas>
-    <div id="status" style="position: absolute; top: 10px; left: 10px; color: #0F0; font-family: monospace; font-size: 11px; background: rgba(0,0,0,0.6); padding: 4px 8px; border-radius: 4px;">INITIALIZING...</div>
+    <div id="msg" style="position: absolute; bottom: 10px; left: 10px; color:#0F0; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.5); padding: 5px;">SYSTEM: ACTIVE</div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
 <script>
-    const video = document.getElementById('v');
+    const v = document.getElementById('v');
     const overlay = document.getElementById('overlay');
     const ctx = overlay.getContext('2d');
-    const status = document.getElementById('status');
-    const cropCanvas = document.createElement('canvas');
-    const cropCtx = cropCanvas.getContext('2d');
+    const msg = document.getElementById('msg');
+    const c = document.createElement('canvas');
+    const c_ctx = c.getContext('2d');
 
     const faceDetection = new FaceDetection({
       locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
     });
-
     faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.7 });
 
     faceDetection.onResults(results => {
@@ -67,105 +68,96 @@ JS_BRIDGE = """
         if (results.detections.length > 0) {
             const face = results.detections[0].boundingBox;
             
-            // Local Overlay Box
-            ctx.strokeStyle = "#00FF00";
-            ctx.lineWidth = 3;
+            // Draw Feedback Box
+            ctx.strokeStyle = "#0F0"; ctx.lineWidth = 3;
             ctx.strokeRect(face.xCenter * 400 - (face.width * 400 / 2), 
                            face.yCenter * 300 - (face.height * 300 / 2), 
                            face.width * 400, face.height * 300);
 
-            // 2X Expanded Crop (0.5x padding on all sides)
-            const w_v = video.videoWidth;
-            const h_v = video.videoHeight;
-            const cropW = face.width * 2 * w_v;
-            const cropH = face.height * 2 * h_v;
-            const cropX = (face.xCenter * w_v) - (cropW / 2);
-            const cropY = (face.yCenter * h_v) - (cropH / 2);
+            // --- 2X CROP LOGIC ---
+            const w_v = v.videoWidth; const h_v = v.videoHeight;
+            const targetW = face.width * 2 * w_v;
+            const targetH = face.height * 2 * h_v;
+            const targetX = (face.xCenter * w_v) - (targetW / 2);
+            const targetY = (face.yCenter * h_v) - (targetH / 2);
 
-            cropCanvas.width = 160; cropCanvas.height = 160;
-            cropCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, 160, 160);
-            const data = cropCanvas.toDataURL('image/jpeg', 0.6);
+            c.width = 160; c.height = 160;
+            c_ctx.drawImage(v, targetX, targetY, targetW, targetH, 0, 0, 160, 160);
+            const data = c.toDataURL('image/jpeg', 0.6);
+
+            // EXTREME HANDSHAKE: Try every possible way to find the Streamlit input
+            const findAndSet = (win) => {
+                const inputs = win.document.querySelectorAll('input');
+                for (let i of inputs) {
+                    if (i.ariaLabel === "image_bridge") {
+                        i.value = data;
+                        i.dispatchEvent(new Event('input', { bubbles: true }));
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            let success = findAndSet(window.parent);
+            if (!success) success = findAndSet(window.top);
+            if (!success) success = findAndSet(window);
             
-            // --- THE CLOUD SHAKEDOWN ---
-            // On Streamlit Cloud, we need to find the specific input among many possible ones
-            const parents = [window, window.parent, window.top];
-            let found = false;
-            
-            parents.forEach(p => {
-                try {
-                    const inputs = p.document.querySelectorAll('input');
-                    inputs.forEach(i => {
-                        // We target the input that was specifically named "bridge"
-                        if (i.ariaLabel === "bridge" || i.placeholder === "bridge") {
-                            i.value = data;
-                            i.dispatchEvent(new Event('input', { bubbles: true }));
-                            found = true;
-                        }
-                    });
-                } catch(e) {}
-            });
-            status.innerText = found ? "SYNC ACTIVE" : "HANDSHAKE ERROR";
+            msg.innerText = success ? "SYNCING..." : "SEARCHING FOR BRIDGE...";
         } else {
-            status.innerText = "SEARCHING...";
+            msg.innerText = "NO FACE DETECTED";
         }
     });
 
     navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
         .then(s => { 
-            video.srcObject = s;
-            async function loop() {
-                await faceDetection.send({image: video});
-                setTimeout(loop, 1000); // Process once per second for stability
-            }
+            v.srcObject = s;
+            async function loop() { await faceDetection.send({image: v}); setTimeout(loop, 1000); }
             loop();
         });
 </script>
 """
 
-# CSS to hide the bridge and fix layouts
-st.markdown("""
-    <style>
-    div[data-testid="stTextInput"] { display: none !important; }
-    .stMetric { background: #1a1a1a; padding: 15px; border-radius: 10px; border-left: 5px solid #0f0; }
-    </style>
-""", unsafe_allow_html=True)
+st.markdown("<style>div[data-testid='stTextInput'] { display: none !important; }</style>", unsafe_allow_html=True)
 
 # --- 4. NAVIGATION ---
 page = st.sidebar.radio("Navigation", ["Live Scanner", "Register Face", "Attendance Log"])
 
+# --- PAGE: LIVE SCANNER ---
 if page == "Live Scanner":
-    st.header("📹 Real-time Biometric Terminal")
-    c1, c2 = st.columns([1.2, 1])
+    st.header("📹 Biometric Scanner")
+    col_v, col_s = st.columns([1, 1])
     
-    with c1:
+    with col_v:
         st.components.v1.html(JS_BRIDGE, height=350)
-        # Placeholder for JS to find
-        img_data = st.text_input("bridge", key="image_bridge", placeholder="bridge")
+        # JS finds this by the aria-label matching the label string "image_bridge"
+        img_data = st.text_input("image_bridge", key="image_bridge", label_visibility="collapsed")
 
-    with c2:
+    with col_s:
+        st.subheader("Identification Status")
         if img_data and len(img_data) > 1000:
             try:
                 encoded = img_data.split(",")[1]
                 nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
-                face_chip = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
                 engine = load_ai()
                 db = load_face_db()
-                faces = engine.get(face_chip)
-
+                faces = engine.get(frame)
+                
                 if faces:
-                    emb = faces[0].normed_embedding
-                    best_name, score = "UNKNOWN", 0
-                    for name, saved_emb in db.items():
-                        sim = np.dot(emb, saved_emb)
-                        if sim > score:
-                            score, best_name = sim, name
+                    feat = faces[0].normed_embedding
+                    best_name, max_sim = "UNKNOWN", 0
                     
-                    if score > 0.45:
-                        st.metric("Subject Identified", best_name, f"{int(score*100)}% Confidence")
-                        st.image(face_chip, width=120, caption="2X Face Crop")
+                    for name, saved_feat in db.items():
+                        sim = np.dot(feat, saved_feat)
+                        if sim > max_sim:
+                            max_sim, best_name = sim, name
+                    
+                    if max_sim > 0.45:
+                        st.metric("Identity", best_name, f"{int(max_sim*100)}% Match")
+                        st.image(frame, width=150, caption="2x Expanded Capture")
                         
-                        # Logging
+                        # Save Log
                         logs = []
                         if os.path.exists(PKL_LOG):
                             with open(PKL_LOG, "rb") as f: logs = pickle.load(f)
@@ -175,17 +167,18 @@ if page == "Live Scanner":
                             with open(PKL_LOG, "wb") as f: pickle.dump(logs, f)
                             st.toast(f"✅ Logged: {best_name}")
                     else:
-                        st.warning("⚠️ Access Denied: Unknown User")
+                        st.warning("Face Unknown")
                 else:
-                    st.info("Analyzing facial landmarks...")
+                    st.info("Aligning features...")
             except:
-                st.error("AI Syncing...")
+                st.error("Stabilizing AI...")
         else:
-            st.info("Awaiting Handshake...")
+            st.info("Awaiting Sensor Handshake...")
 
-# --- 5. REGISTER (Original Restored) ---
+# --- PAGE: REGISTER (ORIGINAL RESTORED) ---
 elif page == "Register Face":
-    st.header("👤 Face Registration")
+    st.header("👤 Register New User")
+    # This is exactly your original form code
     with st.form("reg"):
         name = st.text_input("FULL NAME").upper().strip()
         file = st.file_uploader("Upload Image", type=['jpg', 'png', 'jpeg'])
@@ -193,24 +186,29 @@ elif page == "Register Face":
             if name and file:
                 with open(os.path.join(DB_FOLDER, f"{name}.jpg"), "wb") as f:
                     f.write(file.getbuffer())
-                load_face_db.clear()
-                st.success(f"Registered {name}")
+                st.cache_resource.clear() # Force re-encoding of database
+                st.success(f"Successfully Registered {name}")
+            else:
+                st.error("Please provide both name and image.")
 
     st.markdown("---")
-    st.subheader("Database")
-    for f in [x for x in os.listdir(DB_FOLDER) if x.lower().endswith(('.jpg', '.png'))]:
-        c1, c2 = st.columns([4, 1])
-        c1.write(f"✅ {f.split('.')[0]}")
-        if c2.button("Delete", key=f):
-            os.remove(os.path.join(DB_FOLDER, f))
-            load_face_db.clear()
-            st.rerun()
+    st.subheader("🗂️ Database Manager")
+    if os.path.exists(DB_FOLDER):
+        for f in [x for x in os.listdir(DB_FOLDER) if x.lower().endswith(('.jpg', '.png'))]:
+            c1, c2 = st.columns([4, 1])
+            c1.write(f"✅ {f.split('.')[0]}")
+            if c2.button("Delete", key=f):
+                os.remove(os.path.join(DB_FOLDER, f))
+                st.cache_resource.clear()
+                st.rerun()
 
-# --- 6. LOGS ---
+# --- PAGE: LOGS ---
 elif page == "Attendance Log":
-    st.header("📊 Attendance")
+    st.header("📊 Attendance Records")
     if os.path.exists(PKL_LOG):
         with open(PKL_LOG, "rb") as f: data = pickle.load(f)
         st.table(pd.DataFrame(data))
         if st.button("Clear Logs"):
             os.remove(PKL_LOG); st.rerun()
+    else:
+        st.info("No records found.")
