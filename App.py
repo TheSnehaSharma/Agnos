@@ -113,7 +113,7 @@ def get_component_html(img_b64=None):
                         .replace("{'none' if img_b64 else 'block'}", display_video) \
                         .replace("{'block' if img_b64 else 'none'}", display_img)
 
-# --- 6. INTELLIGENT TRIGGER ---
+# --- 6. LOGIC TRIGGER ---
 qp = st.query_params
 if "detected_name" in qp:
     det_name = qp["detected_name"]
@@ -122,28 +122,18 @@ if "detected_name" in qp:
 
     if st.session_state.auth_status and det_name and det_name != "Unknown":
         
-        # A. Check if known
-        is_known = det_name in st.session_state.logged_set
-        
-        # B. Try Save (Returns True if new, False if known)
+        # 1. Try to Save
         saved_new = save_log(det_name, c_date, c_time)
         
-        # C. Feedback Logic
+        # 2. Check Memory (is this an existing user?)
+        is_known = det_name in st.session_state.logged_set
+
+        # 3. Feedback
         if saved_new:
-            # Case 1: New Log -> Green
             st.toast(f"✅ Attendance Marked: {det_name}", icon="⚡")
         elif is_known:
-            # Case 2: Already Logged -> Blue
-            # We use a session state timer to prevent toast spamming
-            # but allow it to reappear every 3 seconds (matching JS heartbeat)
-            now = time.time()
-            if "last_toast_time" not in st.session_state:
-                st.session_state.last_toast_time = 0
+            st.toast(f"👋 Welcome back: {det_name}", icon="👀")
             
-            if now - st.session_state.last_toast_time > 2.0:
-                st.toast(f"👋 Welcome back: {det_name}", icon="👀")
-                st.session_state.last_toast_time = now
-
 # --- 7. UI ---
 if not st.session_state.auth_status:
     # LOGIN SCREEN
