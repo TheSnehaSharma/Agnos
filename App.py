@@ -85,4 +85,118 @@ fd.onResults(r => {
 
   const vw = v.videoWidth, vh = v.videoHeight;
   const w = b.width * 2 * vw;
-  const h = b.height
+  const h = b.height * 2 * vh;
+  const x = b.xCenter*vw - w/2;
+  const y = b.yCenter*vh - h/2;
+
+  c.width = 160; c.height = 160;
+  cctx.drawImage(v, x,y,w,h,0,0,160,160);
+  const data = c.toDataURL("image/jpeg",0.6);
+
+  if (window.Streamlit) {
+    window.Streamlit.setComponentValue(data);
+    txt.innerText = "SYNCED";
+  }
+});
+
+navigator.mediaDevices.getUserMedia({video:{width:640,height:480}})
+.then(s=>{
+  v.srcObject=s;
+  async function loop(){
+    await fd.send({image:v});
+    setTimeout(loop, 900);
+  }
+  loop();
+});
+</script>
+"""
+
+# ---------------- NAV ----------------
+page = st.sidebar.radio("Navigation", ["Live Scanner", "Register Face", "Attendance"])
+
+# ---------------- LIVE SCANNER ----------------
+if page == "Live Scanner":
+    st.header("📹 Live Biometric Scanner")
+    col1, col2 = st.columns([1,1])
+
+    with col1:
+        img_data = st.components.v1.html(JS_BRIDGE, height=360)
+
+    with col2:
+        st.subheader("Recognition")
+        if img_data and len(img_data) > 1000:
+            try:
+                encoded = img_data.split(",")[1]
+                img = cv2.imdecode(
+                    np.frombuffer(base64.b64decode(encoded), np.uint8),
+                    cv2.IMREAD_COLOR
+                )
+
+                engine = load_engine()
+                db = load_face_db()
+                faces = engine.get(img)
+
+                if faces:
+                    emb = faces[0].normed_embedding
+                    best, score = "UNKNOWN", 0
+
+                    for name, ref in db.items():
+                        s = float(np.dot(emb, ref))
+                        if s > score:
+                            best, score = name, s
+
+                    if score >= SIM_THRESHOLD:
+                        st.success(f"{best} — {int(score*100)}%")
+                        st.image(img, width=160)
+
+                        logs=[]
+                        if os.path.exists(LOG_FILE):
+                            with open(LOG_FILE,"rb") as f:
+                                logs=pickle.load(f)
+
+                        today = datetime.now().strftime("%Y-%m-%d")
+                        if not any(l["Name"]==best and l["Date"]==today for l in logs):
+                            logs.append({
+                                "Name": best,
+                                "Time": datetime.now().strftime("%H:%M:%S"),
+                                "Date": today
+                            })
+                            with open(LOG_FILE,"wb") as f:
+                                pickle.dump(logs,f)
+                            st.toast(f"Logged {best}")
+
+                    else:
+                        st.warning("Unknown Face")
+                else:
+                    st.info("Aligning...")
+            except Exception as e:
+                st.error("Processing Error")
+        else:
+            st.info("Waiting for camera")
+
+# ---------------- REGISTER ----------------
+elif page == "Register Face":
+    st.header("👤 Register User")
+    with st.form("reg"):
+        name = st.text_input("Full Name").upper().strip()
+        img = st.file_uploader("Image", ["jpg","png","jpeg"])
+        if st.form_submit_button("Save"):
+            if name and img:
+                with open(os.path.join(DB_FOLDER,f"{name}.jpg"),"wb") as f:
+                    f.write(img.getbuffer())
+                st.cache_resource.clear()
+                st.success("Registered")
+            else:
+                st.error("Missing data")
+
+# ---------------- LOGS ----------------
+elif page == "Attendance":
+    st.header("📊 Attendance")
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE,"rb") as f:
+            st.table(pd.DataFrame(pickle.load(f)))
+        if st.button("Clear"):
+            os.remove(LOG_FILE)
+            st.rerun()
+    else:
+        st.info("No logs")
