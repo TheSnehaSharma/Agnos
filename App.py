@@ -45,6 +45,7 @@ def load_auth():
 
 def save_auth(data):
     with open(AUTH_FILE, "w") as f: json.dump(data, f)
+        
 
 def get_file_paths(org_key):
     return {
@@ -58,7 +59,7 @@ if "org_key" not in st.session_state: st.session_state.org_key = None
 if "db" not in st.session_state: st.session_state.db = {}
 if "logged_set" not in st.session_state: st.session_state.logged_set = set()
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
-if "component_key" not in st.session_state: st.session_state.component_key = str(uuid.uuid4())
+if "component_key" not in st.session_state: st.session_state.component_key = str(uuid.uuid4())uuid4())
 
 # --- 5. DATA MANAGEMENT ---
 def load_org_data(org_key):
