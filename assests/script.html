@@ -10,37 +10,29 @@ const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
 const triggerBtn = document.getElementById("trigger-btn"); 
 
-// --- PYTHON VARIABLES INJECTED HERE ---
+// INJECTED VARIABLES
 const staticImgSrc = "STATIC_IMG_PLACEHOLDER";
 const runMode = "RUN_MODE_PLACEHOLDER";
 const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
 let lastVideoTime = -1;
+let lastProcessTime = -1;
+
+// --- STATE MACHINE ---
 let currentMatch = "Unknown";
 let matchStartTime = 0;
+let pendingLog = false;
 
 // --- GEOMETRIC MATH ---
 function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
-// Pose Guard: Check if looking straight
-function isFaceFrontal(landmarks) {
-    const nose = landmarks[1];
-    const leftEar = landmarks[234];
-    const rightEar = landmarks[454];
-    const distL = getDist3D(nose, leftEar);
-    const distR = getDist3D(nose, rightEar);
-    const ratio = Math.min(distL, distR) / Math.max(distL, distR);
-    if (ratio < 0.5) return false;
-    return true;
-}
-
+// 14-Point Structural Fingerprint (Rotation Invariant)
 function getFaceVector(landmarks) {
     const P = (idx) => landmarks[idx]; 
-    const eyeDist = getDist3D(P(468), P(473));
-    // 14 Invariant Ratios
+    const eyeDist = getDist3D(P(468), P(473)); // Anchor
     const features = [
         [1, 4], [1, 61], [1, 291], [61, 291], [33, 133], [263, 362], 
         [1, 152], [10, 152], [234, 454], [1, 468], [1, 473], 
@@ -65,7 +57,7 @@ function findMatch(landmarks) {
         if (score < bestMatch.score) bestMatch = { name: name, score: score };
     }
     
-    // Strict Threshold
+    // Threshold (0.65 is standard for this 14-point vector)
     if (bestMatch.score < 0.65) return bestMatch.name;
     return "Unknown";
 }
@@ -78,7 +70,9 @@ async function init() {
             delegate: "GPU"
         },
         runningMode: runMode,
-        numFaces: 1
+        numFaces: 1,
+        minFaceDetectionConfidence: 0.5,
+        minFacePresenceConfidence: 0.5
     });
 
     if (staticImgSrc !== "null") {
@@ -103,86 +97,96 @@ async function init() {
 async function predictVideo() {
     const now = performance.now();
     
-    if (lastVideoTime !== video.currentTime) {
+    // SAFETY: Don't process if video hasn't advanced (Fixes MediaPipe Freeze)
+    if (video.currentTime !== lastVideoTime) {
         lastVideoTime = video.currentTime;
-        const results = faceLandmarker.detectForVideo(video, now);
         
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        if (results.faceLandmarks.length > 0) {
-            const landmarks = results.faceLandmarks[0];
+        try {
+            const results = faceLandmarker.detectForVideo(video, now);
             
-            // 1. POSE CHECK
-            const isFrontal = isFaceFrontal(landmarks);
-            
-            let name = "Unknown";
-            let color = "#FF0000"; 
-            let label = "UNKNOWN";
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            if (!isFrontal) {
-                name = "Unknown";
-                label = "LOOK STRAIGHT";
-                color = "#FF4B4B";
-            } else {
-                name = findMatch(landmarks);
+            if (results.faceLandmarks.length > 0) {
+                const landmarks = results.faceLandmarks[0];
+                const name = findMatch(landmarks);
+
+                // --- STATE MACHINE ---
                 
-                // Stability Logic
+                // 1. New Person Detected (or Unknown) -> Reset Timer
                 if (name !== currentMatch) {
                     currentMatch = name;
                     matchStartTime = now;
+                    pendingLog = true; // Ready to log this new person
                 }
 
                 const timeElapsed = now - matchStartTime;
                 const isUnknown = (currentMatch === "Unknown");
-                const isVerified = (!isUnknown && timeElapsed > 1000); 
+                
+                // 2. Verification Threshold (1.2 Seconds)
+                const isVerified = (!isUnknown && timeElapsed > 1200); 
+
+                // 3. LOGGING TRIGGER
+                // We only log if: Verified AND we haven't logged them yet in this "glance"
+                if (isVerified && pendingLog) {
+                    try {
+                        const url = new URL(window.parent.location.href);
+                        
+                        // Set Name & Time
+                        url.searchParams.set("detected_name", currentMatch);
+                        
+                        const d = new Date();
+                        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
+                        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
+                        
+                        url.searchParams.set("c_date", dateStr);
+                        url.searchParams.set("c_time", timeStr);
+                        url.searchParams.set("ts", Date.now()); // Force change
+                        
+                        window.parent.history.replaceState({}, "", url);
+                        if(triggerBtn) triggerBtn.click();
+                        
+                        pendingLog = false; // Mark as logged so we don't spam
+                    } catch(e) { console.error(e); }
+                }
+
+                // --- VISUALS ---
+                const xs = landmarks.map(p => p.x * canvas.width);
+                const ys = landmarks.map(p => p.y * canvas.height);
+                const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
+                
+                let color = "#FF0000"; 
+                let label = "UNKNOWN";
 
                 if (!isUnknown) {
                     if (isVerified) {
-                        color = "#00FF00"; 
-                        label = currentMatch; 
-                        
-                        // Send to Python
-                        try {
-                            const url = new URL(window.parent.location.href);
-                            if (url.searchParams.get("detected_name") !== currentMatch) {
-                                url.searchParams.set("detected_name", currentMatch);
-                                // Client Time Sync
-                                const d = new Date();
-                                const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
-                                const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
-                                
-                                url.searchParams.set("c_date", dateStr);
-                                url.searchParams.set("c_time", timeStr);
-                                url.searchParams.set("ts", Date.now()); 
-                                
-                                window.parent.history.replaceState({}, "", url);
-                                if(triggerBtn) triggerBtn.click();
-                            }
-                        } catch(e) {}
-                        
+                        color = "#00FF00"; // Green
+                        label = currentMatch;
                     } else {
-                        color = "#FFFF00"; 
-                        label = "VERIFYING..."; 
+                        color = "#FFFF00"; // Yellow
+                        label = "VERIFYING...";
                     }
                 }
+
+                ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
+                ctx.fillStyle = color; ctx.fillRect(x, y - 30, w, 30);
+                ctx.fillStyle = "#000"; ctx.font = "bold 16px sans-serif"; ctx.fillText(label, x + 5, y - 8);
+                
+            } else {
+                // NO FACE FOUND -> FULL RESET
+                // This is crucial. If I walk away, the system must forget me.
+                currentMatch = "Unknown";
+                pendingLog = true;
             }
-
-            // Draw
-            ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(landmarks[1].x, landmarks[1].y, 10, 10); // Debug point
-            
-            // Re-calculate Box based on landmarks
-            const xs = landmarks.map(p => p.x * canvas.width);
-            const ys = landmarks.map(p => p.y * canvas.height);
-            const x = Math.min(...xs); const y = Math.min(...ys);
-            const w = Math.max(...xs) - x; const h = Math.max(...ys) - y;
-
-            ctx.strokeRect(x, y, w, h);
-            ctx.fillStyle = color; ctx.fillRect(x, y - 30, w, 30);
-            ctx.fillStyle = "#000"; ctx.font = "bold 16px sans-serif"; ctx.fillText(label, x + 5, y - 8);
+        } catch (e) {
+            console.error("MediaPipe Error:", e);
+            // If it crashes, wait 100ms and try again (Auto-Recovery)
+            await new Promise(r => setTimeout(r, 100));
         }
     }
+    
+    // Always request next frame
     window.requestAnimationFrame(predictVideo);
 }
 
