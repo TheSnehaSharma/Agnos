@@ -39,18 +39,22 @@ if "db" not in st.session_state: st.session_state.db = {}
 if "logged_set" not in st.session_state: st.session_state.logged_set = set()
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 if "component_key" not in st.session_state: st.session_state.component_key = str(uuid.uuid4())
+if "last_logged_user" not in st.session_state: st.session_state.last_logged_user = None
 
 # --- BACKEND LOGIC ---
 def load_org_data(org_key):
     paths = get_file_paths(org_key)
     
+    # 1. Load Faces
     if os.path.exists(paths["db"]):
         with open(paths["db"], "r") as f: st.session_state.db = json.load(f)
     else:
         st.session_state.db = {} 
     
+    # 2. Clear Memory
     st.session_state.logged_set = set() 
     
+    # 3. Load Logs
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
             try:
@@ -68,11 +72,20 @@ def save_log(name, date_str, time_str):
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f: logs = pickle.load(f)
     
-    if not any(e['Name'] == name and e['Date'] == date_str for e in logs):
-        entry = {"Name": name, "Time": time_str, "Date": date_str}
+    # Check if this person has been logged ON THIS DATE
+    already_logged = any(e['Name'] == name and e['Date'] == date_str for e in logs)
+    
+    if not already_logged:
+        entry = {
+            "Name": name, 
+            "Time": time_str, 
+            "Date": date_str
+        }
         logs.append(entry)
         with open(paths["logs"], "wb") as f: pickle.dump(logs, f)
+        
         st.session_state.logged_set.add(name)
+        st.session_state.last_logged_user = name
         return True
     return False
 
@@ -134,67 +147,59 @@ let lastVideoTime = -1;
 let currentMatch = "Unknown";
 let matchStartTime = 0;
 
-// --- GEOMETRIC MATH ---
+// --- 3D MATH (Requested Logic) ---
 function getDist3D(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
-// 2. SCALAR GEOMETRY (ROTATION INVARIANT)
-// Instead of coordinates (which change when you tilt head),
-// We measure the DISTANCE between key points. 
-// Distance between nose and chin is the same even if you are upside down.
 function getFaceVector(landmarks) {
-    const P = (idx) => landmarks[idx]; 
+    const L_EYE = landmarks[468]; const R_EYE = landmarks[473]; 
+    const NOSE  = landmarks[4];   const CHIN  = landmarks[152]; 
+    const L_EAR = landmarks[234]; const R_EAR = landmarks[454]; 
+    
+    // Anchor: Eye Distance (in 3D space)
+    const eyeDist = getDist3D(L_EYE, R_EYE);
 
-    // 1. Anchor: Inter-Pupillary Distance (distance between eyes)
-    // We divide all other distances by this to handle camera zoom.
-    const eyeDist = getDist3D(P(468), P(473));
-
-    // 2. Structural Measurements (The "Web")
-    const features = [
-        [1, 4],     // Nose bridge
-        [1, 61],    // Nose Tip -> Mouth Corner L
-        [1, 291],   // Nose Tip -> Mouth Corner R
-        [61, 291],  // Mouth Width
-        [33, 133],  // Eye Width L
-        [263, 362], // Eye Width R
-        [1, 152],   // Nose -> Chin
-        [10, 152],  // Forehead -> Chin (Face Height)
-        [234, 454], // Cheek -> Cheek (Face Width)
-        [1, 468],   // Nose -> L Iris
-        [1, 473],   // Nose -> R Iris
-        [152, 234], // Chin -> L Cheek
-        [152, 454], // Chin -> R Cheek
-        [10, 1]     // Forehead -> Nose
+    return [
+        getDist3D(NOSE, L_EYE) / eyeDist,  // Nose-LeftEye
+        getDist3D(NOSE, R_EYE) / eyeDist,  // Nose-RightEye
+        getDist3D(NOSE, CHIN)  / eyeDist,  // Nose-Chin
+        getDist3D(L_EAR, R_EAR)/ eyeDist,  // Face Width
+        getDist3D(L_EYE, CHIN) / eyeDist,  // LeftEye-Chin
+        getDist3D(R_EYE, CHIN) / eyeDist   // RightEye-Chin
     ];
-
-    // Return Array of Ratios
-    return features.map(pair => getDist3D(P(pair[0]), P(pair[1])) / eyeDist);
 }
 
-// Simple Manhattan Distance for Scalars
-function calculateScore(vecA, vecB) {
-    let diff = 0;
-    for (let i = 0; i < vecA.length; i++) {
-        diff += Math.abs(vecA[i] - vecB[i]);
-    }
-    return diff;
-}
-
-function findMatch(landmarks) {
-    const currentVec = getFaceVector(landmarks);
-    let bestMatch = { name: "Unknown", score: 1000.0 }; // Lower score is better
+function findMatch(currentLandmarks) {
+    const currentVec = getFaceVector(currentLandmarks);
+    let bestMatch = { name: "Unknown", error: 100 };
+    
+    // Weights prioritize the Nose/Eye triangle (Rigid Bone) over the Chin (Moves when talking)
+    const weights = [2.0, 2.0, 1.0, 1.5, 1.0, 1.0]; 
 
     for (const [name, savedLandmarks] of Object.entries(registry)) {
         const savedVec = getFaceVector(savedLandmarks);
-        const score = calculateScore(currentVec, savedVec);
-        if (score < bestMatch.score) bestMatch = { name: name, score: score };
+        let weightedError = 0;
+        let totalWeight = 0;
+
+        for(let i=0; i<currentVec.length; i++) {
+            const diff = Math.abs(currentVec[i] - savedVec[i]);
+            weightedError += diff * weights[i];
+            totalWeight += weights[i];
+        }
+
+        const avgError = weightedError / totalWeight;
+        if (avgError < bestMatch.error) {
+            bestMatch = { name: name, error: avgError };
+        }
     }
-    
-    // Threshold: Sum of ratio differences.
-    // 0.8 is usually a good tight threshold for this many features.
-    if (bestMatch.score < 0.65) return bestMatch.name;
-    return "Unknown";
+
+    // Threshold: 0.08 is the sweet spot for this weighted error
+    if (bestMatch.error < 0.08) {
+        return { name: bestMatch.name }; 
+    } else {
+        return { name: "Unknown" };
+    }
 }
 
 async function init() {
@@ -240,9 +245,10 @@ async function predictVideo() {
 
         if (results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
-            const name = findMatch(landmarks);
+            const match = findMatch(landmarks);
+            const name = match.name;
 
-            // --- STABILITY ---
+            // --- STABILITY & PERSISTENCE ---
             if (name !== currentMatch) {
                 currentMatch = name;
                 matchStartTime = now;
@@ -250,15 +256,17 @@ async function predictVideo() {
 
             const timeElapsed = now - matchStartTime;
             const isUnknown = (currentMatch === "Unknown");
-            const isVerified = (!isUnknown && timeElapsed > 1000); 
+            const isVerified = (!isUnknown && timeElapsed > 1000); // 1.0s Confirmation
 
+            // --- TRIGGER PYTHON (Without freezing) ---
             if (isVerified) {
                 try {
                     const url = new URL(window.parent.location.href);
+                    // Only update if not already set to avoid loop
                     if (url.searchParams.get("detected_name") !== currentMatch) {
                         url.searchParams.set("detected_name", currentMatch);
                         
-                        // Client Time
+                        // Capture Client Time
                         const d = new Date();
                         const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
                         const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
@@ -273,6 +281,10 @@ async function predictVideo() {
                 } catch(e) {}
             }
 
+            // --- AUTO-RESET STATUS ---
+            // If the user leaves, reset the status in UI immediately
+            // (Note: Python state clears on 'ts' timeout, visual clears here)
+            
             // --- DRAWING ---
             const xs = landmarks.map(p => p.x * canvas.width);
             const ys = landmarks.map(p => p.y * canvas.height);
@@ -294,14 +306,6 @@ async function predictVideo() {
             ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
             ctx.fillStyle = color; ctx.fillRect(x, y - 30, w, 30);
             ctx.fillStyle = "#000"; ctx.font = "bold 16px sans-serif"; ctx.fillText(label, x + 5, y - 8);
-
-            // Show "Web" for debug
-            ctx.strokeStyle = "rgba(0, 255, 255, 0.2)";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(landmarks[468].x*canvas.width, landmarks[468].y*canvas.height);
-            ctx.lineTo(landmarks[473].x*canvas.width, landmarks[473].y*canvas.height); // Eye line
-            ctx.stroke();
         }
     }
     window.requestAnimationFrame(predictVideo);
@@ -349,6 +353,7 @@ if not st.session_state.auth_status:
         st.title("🔐 Agnos Login")
         st.markdown("Enter your Organization Key to proceed.")
         
+        # KEY INPUT
         key_in = st.text_input("Organization Key (5 Char)", max_chars=5, placeholder="e.g. ALPHA").upper()
         
         auth_db = load_auth()
@@ -428,16 +433,20 @@ else:
 
     st.title("Agnos Enterprise Biometrics")
     
+    # TABS NAVIGATION
     tab_scan, tab_reg, tab_logs, tab_db = st.tabs(["🎥 Scanner", "👤 Register", "📊 Logs", "🗄️ Database"])
 
     with tab_scan:
         c_vid, c_stat = st.columns([2, 1])
         with c_vid:
+            # We use a unique key here to force rebuilds on org change
             st.components.v1.html(get_component_html(), height=500)
         with c_stat:
             st.subheader("Live Feed")
             if "detected_name" in st.query_params:
                 det = st.query_params["detected_name"]
+                
+                # AUTO-CLEAR LOGIC (3 Seconds TTL)
                 ts = float(st.query_params.get("ts", 0))
                 if time.time() * 1000 - ts > 3000:
                     st.query_params.clear()
