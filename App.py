@@ -50,10 +50,10 @@ def load_org_data(org_key):
     else:
         st.session_state.db = {} 
     
-    # 2. Clear Memory
+    # 2. Clear Previous Logs Memory
     st.session_state.logged_set = set() 
     
-    # 3. Load Logs
+    # 3. Load New Logs
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
             try:
@@ -238,7 +238,6 @@ async function predictVideo() {
             if (isVerified) {
                 try {
                     const url = new URL(window.parent.location.href);
-                    // Prevent spamming the same name
                     if (url.searchParams.get("detected_name") !== currentMatch) {
                         url.searchParams.set("detected_name", currentMatch);
                         
@@ -386,12 +385,22 @@ else:
         st.metric("Users", len(st.session_state.db))
         st.metric("Logs Today", len(st.session_state.logged_set))
         st.markdown("---")
+        
+        # --- HARD RESET LOGOUT ---
         if st.button("Log Out"):
-            st.session_state.auth_status = False
-            st.session_state.org_key = None
-            st.session_state.db = {}
-            st.session_state.logged_set = set()
-            st.rerun()
+            # 1. Clear State
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            
+            # 2. Clear URL Params
+            st.query_params.clear()
+
+            # 3. Force Browser Reload
+            st.markdown("""
+                <meta http-equiv="refresh" content="0">
+                <script>parent.window.location.reload();</script>
+            """, unsafe_allow_html=True)
+            st.stop()
             
         # --- DANGER ZONE ---
         with st.expander("⚠️ Danger Zone"):
@@ -408,11 +417,12 @@ else:
                     del auth_db[st.session_state.org_key]
                     save_auth(auth_db)
                 
-                # 3. Logout
-                st.session_state.auth_status = False
-                st.session_state.org_key = None
-                st.session_state.db = {}
-                st.rerun()
+                # 3. Hard Logout
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.query_params.clear()
+                st.markdown("""<meta http-equiv="refresh" content="0"><script>parent.window.location.reload();</script>""", unsafe_allow_html=True)
+                st.stop()
 
     st.title("Agnos Enterprise Biometrics")
     
@@ -422,15 +432,13 @@ else:
     with tab_scan:
         c_vid, c_stat = st.columns([2, 1])
         with c_vid:
-            # We use a unique key here to force rebuilds on org change
             st.components.v1.html(get_component_html(), height=500)
         with c_stat:
             st.subheader("Live Feed")
             if "detected_name" in st.query_params:
                 det = st.query_params["detected_name"]
                 
-                # AUTO-CLEAR LOGIC:
-                # Check timestamp. If > 3 seconds old, clear the display.
+                # AUTO-CLEAR LOGIC (3 Seconds TTL)
                 ts = float(st.query_params.get("ts", 0))
                 if time.time() * 1000 - ts > 3000:
                     st.query_params.clear()
