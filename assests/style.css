@@ -1,0 +1,66 @@
+/* GLOBAL THEME */
+body {
+    background-color: #0e1117;
+    color: #ffffff;
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* CAMERA CONTAINER */
+#view {
+    position: relative;
+    width: 100%;
+    height: 520px;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid #333;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+
+canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 10;
+}
+
+video {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 5;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* STREAMLIT OVERRIDES */
+.stDeployButton { display: none; }
+div[data-testid="stForm"] {
+    border: 1px solid #333;
+    padding: 25px;
+    border-radius: 12px;
+    background-color: #161b22;
+}
+
+/* TAB STYLING */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 20px;
+    margin-bottom: 20px;
+}
+
+.stTabs [data-baseweb="tab"] {
+    height: 50px;
+    white-space: pre-wrap;
+    background-color: transparent;
+    border-radius: 8px 8px 0px 0px;
+    color: #8b949e;
+    font-weight: 600;
+    border: none;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #1f2937;
+    color: #00FF00;
+    border-bottom: 3px solid #00FF00;
+}
