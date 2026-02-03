@@ -41,9 +41,9 @@ def load_face_db():
 # ---------------- NAV ----------------
 page = st.sidebar.radio("Navigation", ["Live Scanner", "Register Face"])
 
-# =========================================================
-# ===================== LIVE SCANNER ======================
-# =========================================================
+# =====================================================
+# ===================== LIVE SCANNER ==================
+# =====================================================
 if page == "Live Scanner":
 
     JS_BRIDGE = r"""
@@ -53,7 +53,9 @@ if page == "Live Scanner":
 
     <div style="position:relative;width:100vw;height:100vh;">
       <video id="v" autoplay playsinline
-        style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1)"></video>
+        style="width:100%;height:100%;object-fit:cover;
+               transform:scaleX(-1)"></video>
+
       <canvas id="o"
         style="position:absolute;top:0;left:0;width:100%;height:100%;
                transform:scaleX(-1);"></canvas>
@@ -67,6 +69,7 @@ if page == "Live Scanner":
     const v = document.getElementById("v");
     const o = document.getElementById("o");
     const ctx = o.getContext("2d");
+
     const c = document.createElement("canvas");
     const cctx = c.getContext("2d");
 
@@ -88,6 +91,7 @@ if page == "Live Scanner":
       const w = b.width*o.width;
       const h = b.height*o.height;
 
+      // Draw box (mirrored display)
       ctx.strokeStyle = "#00ff00";
       ctx.lineWidth = 3;
       ctx.strokeRect(x,y,w,h);
@@ -96,18 +100,30 @@ if page == "Live Scanner":
       ctx.font = "18px monospace";
       ctx.fillText(`${NAME} (${SCORE}%)`, x, y-10);
 
-      const vw = v.videoWidth, vh = v.videoHeight;
-      const cw = b.width*2*vw;
-      const ch = b.height*2*vh;
-      const cx = b.xCenter*vw - cw/2;
-      const cy = b.yCenter*vh - ch/2;
+      // -------- UN-MIRROR FOR RECOGNITION --------
+      const vw = v.videoWidth;
+      const vh = v.videoHeight;
 
-      c.width = 160; c.height = 160;
-      cctx.drawImage(v, cx,cy,cw,ch, 0,0,160,160);
+      const cw = b.width * 2 * vw;
+      const ch = b.height * 2 * vh;
+
+      // Convert mirrored x back to real x
+      const realX = vw - (b.xCenter * vw) - cw/2;
+      const realY = b.yCenter * vh - ch/2;
+
+      c.width = 160;
+      c.height = 160;
+
+      cctx.setTransform(1,0,0,1,0,0);
+      cctx.drawImage(
+        v,
+        realX, realY, cw, ch,
+        0, 0, 160, 160
+      );
 
       if (window.Streamlit) {
         Streamlit.setComponentValue(
-          c.toDataURL("image/jpeg",0.6)
+          c.toDataURL("image/jpeg", 0.6)
         );
       }
     });
@@ -117,7 +133,7 @@ if page == "Live Scanner":
       v.srcObject=s;
       async function loop(){
         await fd.send({image:v});
-        setTimeout(loop, 800);
+        setTimeout(loop, 900);
       }
       loop();
     });
@@ -132,7 +148,10 @@ if page == "Live Scanner":
 
     if isinstance(img_data, str) and img_data.startswith("data:image"):
         frame = cv2.imdecode(
-            np.frombuffer(base64.b64decode(img_data.split(",")[1]), np.uint8),
+            np.frombuffer(
+                base64.b64decode(img_data.split(",")[1]),
+                np.uint8
+            ),
             cv2.IMREAD_COLOR
         )
 
@@ -153,22 +172,21 @@ if page == "Live Scanner":
                 st.session_state.identity = "UNKNOWN"
                 st.session_state.score = int(score * 100)
 
-# =========================================================
-# ==================== REGISTER FACE ======================
-# =========================================================
+# =====================================================
+# ==================== REGISTER FACE ==================
+# =====================================================
 elif page == "Register Face":
 
-    st.header("👤 Register New Face")
+    st.header("👤 Register Face")
 
     name = st.text_input("Full Name").upper().strip()
-    img = st.file_uploader("Upload face image", ["jpg","png","jpeg"])
+    img = st.file_uploader("Upload image", ["jpg","png","jpeg"])
 
     if st.button("Register"):
         if not name or not img:
             st.error("Provide name and image")
         else:
-            path = os.path.join(DB_FOLDER, f"{name}.jpg")
-            with open(path, "wb") as f:
+            with open(os.path.join(DB_FOLDER, f"{name}.jpg"), "wb") as f:
                 f.write(img.getbuffer())
             st.cache_resource.clear()
             st.success(f"Registered {name}")
