@@ -22,8 +22,10 @@ if "db" not in st.session_state:
 
 if "logged_set" not in st.session_state:
     st.session_state.logged_set = set()
-if "last_detected" not in st.session_state:
-    st.session_state.last_detected = None
+
+# Trigger for clearing the form
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
 # --- CSS ---
 CSS_CODE = """
@@ -35,7 +37,7 @@ video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; 
 </style>
 """
 
-# --- JS CODE: 3D Biometric Fingerprinting + Time Persistence ---
+# --- JS CODE: 3D Biometric Fingerprinting + Auto-Sync ---
 JS_CODE = """
 <script type="module">
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
@@ -44,45 +46,29 @@ const video = document.getElementById("webcam");
 const staticImg = document.getElementById("static-img");
 const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
-const log = document.getElementById("status-bar");
 
 const staticImgSrc = "STATIC_IMG_PLACEHOLDER";
 const runMode = "RUN_MODE_PLACEHOLDER";
 const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
-let lastVideoTime = -1;
-
-// --- Persistence Variables ---
 let currentMatchName = "Unknown";
 let matchStartTime = 0;
 let isConfirmed = false;
 
 function getDist3D(p1, p2) {
-    return Math.sqrt(
-        Math.pow(p1.x - p2.x, 2) + 
-        Math.pow(p1.y - p2.y, 2) + 
-        Math.pow(p1.z - p2.z, 2)
-    );
+    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
 }
 
 function getFaceVector(landmarks) {
-    const L_EYE = landmarks[468]; 
-    const R_EYE = landmarks[473]; 
-    const NOSE  = landmarks[4];   
-    const CHIN  = landmarks[152]; 
-    const L_EAR = landmarks[234]; 
-    const R_EAR = landmarks[454]; 
-    
+    const L_EYE = landmarks[468]; const R_EYE = landmarks[473]; 
+    const NOSE  = landmarks[4];   const CHIN  = landmarks[152]; 
+    const L_EAR = landmarks[234]; const R_EAR = landmarks[454]; 
     const eyeDist = getDist3D(L_EYE, R_EYE);
-
     return [
-        getDist3D(NOSE, L_EYE) / eyeDist,  
-        getDist3D(NOSE, R_EYE) / eyeDist,  
-        getDist3D(NOSE, CHIN)  / eyeDist,  
-        getDist3D(L_EAR, R_EAR)/ eyeDist,  
-        getDist3D(L_EYE, CHIN) / eyeDist,  
-        getDist3D(R_EYE, CHIN) / eyeDist   
+        getDist3D(NOSE, L_EYE) / eyeDist, getDist3D(NOSE, R_EYE) / eyeDist,
+        getDist3D(NOSE, CHIN)  / eyeDist, getDist3D(L_EAR, R_EAR)/ eyeDist,
+        getDist3D(L_EYE, CHIN) / eyeDist, getDist3D(R_EYE, CHIN) / eyeDist   
     ];
 }
 
@@ -93,26 +79,16 @@ function findMatch(currentLandmarks) {
 
     for (const [name, savedLandmarks] of Object.entries(registry)) {
         const savedVec = getFaceVector(savedLandmarks);
-        let weightedError = 0;
-        let totalWeight = 0;
-
+        let weightedError = 0, totalWeight = 0;
         for(let i=0; i<currentVec.length; i++) {
             const diff = Math.abs(currentVec[i] - savedVec[i]);
-            weightedError += diff * weights[i];
-            totalWeight += weights[i];
+            weightedError += diff * weights[i]; totalWeight += weights[i];
         }
-
-        const avgError = weightedError / totalWeight;
-        if (avgError < bestMatch.error) {
-            bestMatch = { name: name, error: avgError };
+        if ((weightedError / totalWeight) < bestMatch.error) {
+            bestMatch = { name: name, error: weightedError / totalWeight };
         }
     }
-
-    if (bestMatch.error < 0.08) {
-        return { name: bestMatch.name }; 
-    } else {
-        return { name: "Unknown" };
-    }
+    return bestMatch.error < 0.08 ? { name: bestMatch.name } : { name: "Unknown" };
 }
 
 async function init() {
@@ -136,7 +112,6 @@ async function init() {
                     const url = new URL(window.parent.location.href);
                     url.searchParams.set("face_data", dataString);
                     window.parent.history.replaceState({}, "", url);
-                    window.parent.postMessage({ type: 'streamlit:setComponentValue', value: 'READY' }, "*");
                 }
             }
         } else {
@@ -144,7 +119,7 @@ async function init() {
             video.srcObject = stream;
             video.onloadeddata = () => predictVideo();
         }
-    } catch (err) { log.innerText = "ERROR: " + err.message; }
+    } catch (err) { console.error(err); }
 }
 
 async function predictVideo() {
@@ -157,24 +132,17 @@ async function predictVideo() {
         const landmarks = results.faceLandmarks[0];
         const match = findMatch(landmarks);
 
-        // --- TIME PERSISTENCE LOGIC ---
-        // 1. If we detect a new person (or Unknown), reset timer
+        // --- TIME PERSISTENCE (1 Second Check) ---
         if (match.name !== currentMatchName) {
             currentMatchName = match.name;
             matchStartTime = now;
             isConfirmed = false;
         }
 
-        // 2. If the same person is detected
         if (currentMatchName !== "Unknown") {
-            const duration = now - matchStartTime;
-            
-            // 3. Check if 1 second (1000ms) has passed
-            if (duration > 1000) {
-                isConfirmed = true;
-            }
+            if ((now - matchStartTime) > 1000) isConfirmed = true;
         } else {
-            isConfirmed = false; // "Unknown" is never confirmed
+            isConfirmed = false;
         }
 
         // --- DRAWING ---
@@ -182,16 +150,15 @@ async function predictVideo() {
         const ys = landmarks.map(p => p.y * canvas.height);
         const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs) - x, h = Math.max(...ys) - y;
 
-        // Color Logic: Green = Confirmed, Orange = Waiting, Red = Unknown
-        let boxColor = "#FF4B4B"; // Red
+        let boxColor = "#FF4B4B"; 
         let displayText = "Unknown";
         
         if (currentMatchName !== "Unknown") {
             if (isConfirmed) {
-                boxColor = "#00FF00"; // Green
+                boxColor = "#00FF00"; 
                 displayText = currentMatchName;
             } else {
-                boxColor = "#FFA500"; // Orange
+                boxColor = "#FFA500"; 
                 const timeLeft = Math.ceil((1000 - (now - matchStartTime))/100);
                 displayText = `Verifying... ${timeLeft}`;
             }
@@ -202,21 +169,20 @@ async function predictVideo() {
         ctx.fillStyle = "black"; ctx.font = "bold 16px sans-serif";
         ctx.fillText(displayText, x + 5, y - 10);
 
-        // --- SEND TO PYTHON ---
-        // Only trigger update if CONFIRMED and it's a new detection for the session
+        // --- SYNC TO PYTHON (The Fix) ---
+        // If confirmed, we force the browser to update the URL and reload
+        // This guarantees the Python script runs and logs the data.
         if (isConfirmed && currentMatchName !== "Unknown") {
             const url = new URL(window.parent.location.href);
+            // Only reload if the URL isn't already set to this person
             if (url.searchParams.get("detected") !== currentMatchName) {
                 url.searchParams.set("detected", currentMatchName);
-                window.parent.history.replaceState({}, "", url);
-                // Force Python rerun
-                window.parent.postMessage({ type: 'streamlit:setComponentValue', value: currentMatchName }, "*");
+                // Force a page update to ensure logging happens
+                window.parent.location.href = url.toString(); 
             }
         }
     } else {
-        // No face detected -> Reset
-        currentMatchName = "Unknown";
-        isConfirmed = false;
+        currentMatchName = "Unknown"; isConfirmed = false;
     }
     window.requestAnimationFrame(predictVideo);
 }
@@ -254,19 +220,15 @@ with st.sidebar:
     st.title("🛡️ Agnos Admin")
     st.markdown("---")
     
-    # Calculate Stats
     total_logs = 0
     if os.path.exists(PKL_LOG):
-        with open(PKL_LOG,"rb") as f: 
-            total_logs = len(pickle.load(f))
+        with open(PKL_LOG,"rb") as f: total_logs = len(pickle.load(f))
             
-    # Display Stats
     st.markdown("### 📈 Live Stats")
     c1, c2 = st.columns(2)
     with c1: st.metric("Registered", len(st.session_state.db))
-    with c2: st.metric("Present (Session)", len(st.session_state.logged_set))
+    with c2: st.metric("Present", len(st.session_state.logged_set))
     st.metric("Total Logs", total_logs)
-    
     st.markdown("---")
     
     if st.button("🔄 Refresh System", use_container_width=True):
@@ -283,8 +245,7 @@ with st.sidebar:
                     del st.session_state.db[reg_name]
                     with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
                     st.rerun()
-    else:
-        st.caption("Database is empty.")
+    else: st.caption("Database is empty.")
 
 # 2. MAIN TABS
 st.title("Agnos Biometric System")
@@ -318,61 +279,52 @@ with tab_live:
 # --- TAB 2: REGISTRATION ---
 with tab_reg:
     st.subheader("Enroll New Personnel")
-    
-    # 2:1 Column Ratio
     c_input, c_preview = st.columns([2, 1])
     
     with c_input:
-        name = st.text_input("Full Name").upper()
-        uploaded = st.file_uploader("Upload Profile Image (Clear frontal face)", type=['jpg','jpeg','png'])
+        # Use dynamic key to clear inputs after save
+        name = st.text_input("Full Name", key=f"name_{st.session_state.uploader_key}").upper()
+        uploaded = st.file_uploader("Upload Profile Image", type=['jpg','jpeg','png'], key=f"upl_{st.session_state.uploader_key}")
         st.info("Upload a photo to begin biometric extraction.")
     
     with c_preview:
         if uploaded:
             st.image(uploaded, caption="Preview", use_container_width=True)
-            # Hidden processing component
             b64 = base64.b64encode(uploaded.getvalue()).decode()
             st.components.v1.html(get_component_html(b64), height=0, width=0)
             
-            # Logic & Save Button below preview
             url_data = st.query_params.get("face_data")
             if url_data and name:
                 if st.button("💾 Save to Database", type="primary", use_container_width=True):
                     st.session_state.db[name] = json.loads(base64.b64decode(url_data).decode())
                     with open(DB_FILE,"w") as f: json.dump(st.session_state.db,f,indent=4)
-                    st.query_params.clear()
-                    st.balloons()
-                    st.rerun()
+                    
+                    # CLEAR FORM LOGIC:
+                    st.session_state.uploader_key += 1 # Increment key to reset widgets
+                    st.query_params.clear()            # Clear URL
+                    st.toast(f"Registered {name}!")
+                    st.rerun()                         # Reload to apply changes
             elif not url_data:
                 st.caption("⏳ Extracting features...")
         else:
-            st.markdown("""
-            <div style="height:150px; border:1px dashed #444; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#666;">
-                No Image
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("""<div style="height:150px; border:1px dashed #444; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#666;">No Image</div>""", unsafe_allow_html=True)
 
 # --- TAB 3: LOGS ---
 with tab_log:
     st.subheader("Access History")
-    
     if os.path.exists(PKL_LOG):
         with open(PKL_LOG,"rb") as f: logs = pickle.load(f)
         df = pd.DataFrame(logs)
-        
         if not df.empty:
             st.dataframe(df, use_container_width=True)
-            
             c1, c2 = st.columns(2)
             with c1:
                 csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Download CSV", csv, "attendance_log.csv", "text/csv", use_container_width=True)
+                st.download_button("📥 Download CSV", csv, "attendance.csv", "text/csv", use_container_width=True)
             with c2:
                 if st.button("🗑️ Clear All Logs", use_container_width=True):
                     os.remove(PKL_LOG)
                     st.session_state.logged_set = set()
                     st.rerun()
-        else:
-            st.info("Log file is empty.")
-    else:
-        st.info("No logs found yet.")
+        else: st.info("Log file is empty.")
+    else: st.info("No logs found yet.")
