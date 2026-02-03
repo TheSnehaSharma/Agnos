@@ -125,16 +125,24 @@ if "detected_name" in qp:
         # A. Check if known
         is_known = det_name in st.session_state.logged_set
         
-        # B. Try to save (True = New Log, False = Duplicate)
+        # B. Try Save (Returns True if new, False if known)
         saved_new = save_log(det_name, c_date, c_time)
         
-        # C. Feedback Logic (Responsive)
+        # C. Feedback Logic
         if saved_new:
-            # New Person -> Green Toast
+            # Case 1: New Log -> Green
             st.toast(f"✅ Attendance Marked: {det_name}", icon="⚡")
         elif is_known:
-            # Existing Person -> Blue Toast (Always show if JS triggered us)
-            st.toast(f"👋 Welcome back: {det_name}", icon="👀")
+            # Case 2: Already Logged -> Blue
+            # We use a session state timer to prevent toast spamming
+            # but allow it to reappear every 3 seconds (matching JS heartbeat)
+            now = time.time()
+            if "last_toast_time" not in st.session_state:
+                st.session_state.last_toast_time = 0
+            
+            if now - st.session_state.last_toast_time > 2.0:
+                st.toast(f"👋 Welcome back: {det_name}", icon="👀")
+                st.session_state.last_toast_time = now
 
 # --- 7. UI ---
 if not st.session_state.auth_status:
