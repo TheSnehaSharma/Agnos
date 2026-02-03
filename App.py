@@ -97,8 +97,12 @@ def save_log(name, date_str, time_str):
 # --- COMPONENT BUILDER ---
 def get_component_html(img_b64=None):
     if not st.session_state.auth_status: return "<div>Please Login</div>"
+    try:
+        with open("assets/script.html", "r") as f:
+            html_template = f.read()
+    except FileNotFoundError:
+        return "<div>Error: assets/script.html not found.</div>"
     
-    # Load HTML template
     html_template = load_asset("assets/script.html")
     
     # Inject Python Data
