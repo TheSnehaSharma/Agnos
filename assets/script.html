@@ -19,7 +19,6 @@ let faceLandmarker;
 let lastVideoTime = -1;
 let currentMatch = "Unknown";
 let matchStartTime = 0;
-let debounceTimer = null; // HOLDS THE STATE
 
 function log(msg) {
     if(logger) logger.innerText = "SYSTEM: " + msg;
@@ -83,7 +82,7 @@ async function init() {
             runningMode: runMode,
             numFaces: 1
         });
-        log("Ready.");
+        log("Ready. Look at camera.");
 
         if (staticImgSrc !== "null") {
             staticImg.src = staticImgSrc;
@@ -91,16 +90,16 @@ async function init() {
                 const results = await faceLandmarker.detect(staticImg);
                 if (results.faceLandmarks.length > 0) {
                     const dataStr = btoa(JSON.stringify(results.faceLandmarks[0]));
-                    const url = new URL(window.parent.location.href);
+                    const url = new URL(window.top.location.href);
                     url.searchParams.set("face_data", dataStr);
-                    window.parent.history.replaceState({}, "", url);
+                    window.top.history.replaceState({}, "", url);
                 }
             }
         } else {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true });
             video.srcObject = stream;
             video.addEventListener("loadeddata", () => {
-                log("Active.");
+                log("Camera Active.");
                 predictVideo();
             });
         }
@@ -109,49 +108,41 @@ async function init() {
     }
 }
 
-// --- STICKY STATE MANAGEMENT ---
-function manageState(name) {
-    const url = new URL(window.parent.location.href);
-    const urlName = url.searchParams.get("detected_name");
+// --- AGGRESSIVE REDIRECT ---
+function forceUpdate(name) {
+    try {
+        const url = new URL(window.top.location.href);
+        const currentUrlName = url.searchParams.get("detected_name");
 
-    // 1. If what we see matches URL, we are stable. Clear any pending reset.
-    if (name === urlName) {
-        if (debounceTimer) {
-            clearTimeout(debounceTimer);
-            debounceTimer = null;
+        // Only redirect if there is a mismatch
+        if (name !== currentUrlName) {
+            log("REDIRECTING to " + name + "...");
+            
+            if (name === "Unknown") {
+                url.searchParams.delete("detected_name");
+                url.searchParams.delete("c_date");
+                url.searchParams.delete("c_time");
+                // Use history for clearing (smoother)
+                window.top.history.replaceState({}, "", url);
+            } else {
+                url.searchParams.set("detected_name", name);
+                
+                const d = new Date();
+                const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
+                const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
+                
+                url.searchParams.set("c_date", dateStr);
+                url.searchParams.set("c_time", timeStr);
+                
+                // FORCE RELOAD
+                window.top.location.href = url.toString();
+            }
         }
-        return;
-    }
-
-    // 2. If we see a NEW person (not Unknown), update IMMEDIATELY.
-    if (name !== "Unknown") {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        
-        // Prepare URL
-        url.searchParams.set("detected_name", name);
-        const d = new Date();
-        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
-        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
-        url.searchParams.set("c_date", dateStr);
-        url.searchParams.set("c_time", timeStr);
-        
-        // Force Reload
-        window.parent.location.href = url.toString();
-        return;
-    }
-
-    // 3. If we see "Unknown" (face lost), WAIT 2 SECONDS before clearing.
-    // This prevents flickering.
-    if (name === "Unknown" && urlName && !debounceTimer) {
-        debounceTimer = setTimeout(() => {
-            const currentUrl = new URL(window.parent.location.href);
-            currentUrl.searchParams.delete("detected_name");
-            currentUrl.searchParams.delete("c_date");
-            currentUrl.searchParams.delete("c_time");
-            // Soft update (no reload needed for clearing)
-            window.parent.history.replaceState({}, "", currentUrl);
-            debounceTimer = null;
-        }, 2000); // 2 Second Stickiness
+    } catch (e) {
+        log("BLOCKED: " + e.message);
+        ctx.fillStyle = "red";
+        ctx.font = "20px Arial";
+        ctx.fillText("BROWSER BLOCKED REDIRECT", 10, 50);
     }
 }
 
@@ -175,10 +166,11 @@ async function predictVideo() {
                 
                 if (!isFaceFrontal(landmarks)) {
                      drawBox(landmarks, "#FF4B4B", "LOOK STRAIGHT");
-                     manageState("Unknown"); 
+                     forceUpdate("Unknown"); 
                 } else {
                     const name = findMatch(landmarks);
 
+                    // Timer Logic
                     if (name !== currentMatch) {
                         currentMatch = name;
                         matchStartTime = now;
@@ -187,25 +179,29 @@ async function predictVideo() {
                     const timeElapsed = now - matchStartTime;
                     const isUnknown = (currentMatch === "Unknown");
                     
-                    // PRE-VERIFY: If URL says it's you, believe it instantly
-                    const urlName = new URL(window.parent.location.href).searchParams.get("detected_name");
-                    const isPreVerified = (currentMatch === urlName && !isUnknown);
+                    // PRE-VERIFY CHECK
+                    let urlName = null;
+                    try { urlName = new URL(window.top.location.href).searchParams.get("detected_name"); } catch(e){}
                     
+                    const isPreVerified = (currentMatch === urlName && !isUnknown);
                     const isVerified = isPreVerified || (!isUnknown && timeElapsed > 1000); 
 
                     if (isVerified) {
-                        drawBox(landmarks, "#00FF00", currentMatch);
-                        manageState(currentMatch);
+                        drawBox(landmarks, "#00FF00", "VERIFIED: " + currentMatch);
+                        // Only trigger update if we haven't already
+                        if (urlName !== currentMatch) {
+                            forceUpdate(currentMatch);
+                        }
                     } else if (!isUnknown) {
                         drawBox(landmarks, "#FFFF00", "VERIFYING...");
                     } else {
                         drawBox(landmarks, "#FF0000", "UNKNOWN");
-                        manageState("Unknown");
+                        forceUpdate("Unknown");
                     }
                 }
             } else {
                 currentMatch = "Unknown";
-                manageState("Unknown");
+                forceUpdate("Unknown");
             }
         } catch (e) {}
     }
