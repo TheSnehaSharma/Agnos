@@ -35,7 +35,7 @@ video, canvas, img { position:absolute; top:0; left:0; width:100%; height:100%; 
 </style>
 """
 
-# --- JS CODE with Ratio-Based Biometrics ---
+# --- JS CODE: 3D Biometric Fingerprinting ---
 JS_CODE = """
 <script type="module">
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
@@ -51,68 +51,85 @@ const runMode = "RUN_MODE_PLACEHOLDER";
 const registry = JSON.parse('DB_JSON_PLACEHOLDER');
 
 let faceLandmarker;
-function getDist(p1, p2) {
-    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+
+// --- 3D Euclidean Distance ---
+// MediaPipe Z is roughly the same scale as X.
+function getDist3D(p1, p2) {
+    return Math.sqrt(
+        Math.pow(p1.x - p2.x, 2) + 
+        Math.pow(p1.y - p2.y, 2) + 
+        Math.pow(p1.z - p2.z, 2)
+    );
 }
 
-function getFaceRatios(landmarks) {
-    const leftIris = landmarks[468];
-    const rightIris = landmarks[473];
-    const noseTip = landmarks[1];
-    const mouthLeft = landmarks[61];
-    const mouthRight = landmarks[291];
-    const chin = landmarks[152];
-    const leftCheek = landmarks[234];
-    const rightCheek = landmarks[454];
+// --- Generate Biometric Fingerprint (The "Face Vector") ---
+// We calculate relative distances between rigid bone points.
+function getFaceVector(landmarks) {
+    // Key landmarks that don't move much when you talk
+    const L_EYE = landmarks[468]; // Left Iris
+    const R_EYE = landmarks[473]; // Right Iris
+    const NOSE  = landmarks[4];   // Nose Tip
+    const CHIN  = landmarks[152]; // Chin
+    const L_EAR = landmarks[234]; // Left Cheek/Ear area
+    const R_EAR = landmarks[454]; // Right Cheek/Ear area
+    
+    // 1. ANCHOR: The distance between eyes (Inter-Pupillary Distance)
+    // We divide everything by this to handle distance from camera.
+    const eyeDist = getDist3D(L_EYE, R_EYE);
 
-    const ipd = getDist(leftIris, rightIris);
-
-    const midEye = { x: (leftIris.x + rightIris.x)/2, y: (leftIris.y + rightIris.y)/2 };
-
-    const ratioVector = [
-        getDist(noseTip, midEye) / ipd,      // Nose Length
-        getDist(mouthLeft, mouthRight) / ipd,// Mouth Width
-        getDist(chin, midEye) / ipd,         // Chin Drop (Face Length)
-        getDist(leftCheek, rightCheek) / ipd,// Face Width
-        getDist(noseTip, chin) / ipd         // Nose-to-Chin Dist
+    // 2. FEATURES: Calculate 5 rigid geometric ratios (3D)
+    // We use an array to store the "fingerprint"
+    return [
+        getDist3D(NOSE, L_EYE) / eyeDist,  // Nose to L-Eye
+        getDist3D(NOSE, R_EYE) / eyeDist,  // Nose to R-Eye
+        getDist3D(NOSE, CHIN)  / eyeDist,  // Nose length
+        getDist3D(L_EAR, R_EAR)/ eyeDist,  // Face Width
+        getDist3D(L_EYE, CHIN) / eyeDist,  // Eye to Chin (Triangle L)
+        getDist3D(R_EYE, CHIN) / eyeDist   // Eye to Chin (Triangle R)
     ];
-
-    return ratioVector;
 }
 
-function calculateDifference(vecA, vecB) {
-    let diff = 0;
-    for (let i = 0; i < vecA.length; i++) {
-        diff += Math.abs(vecA[i] - vecB[i]);
-    }
-    return diff;
-}
-
+// --- Weighted Similarity Search ---
 function findMatch(currentLandmarks) {
-    const currentVec = getFaceRatios(currentLandmarks);
-    let bestMatch = { name: "Unknown", score: 100 }; // High score = bad match
+    const currentVec = getFaceVector(currentLandmarks);
+    let bestMatch = { name: "Unknown", error: 100 };
+
+    // Weights allow us to care MORE about bone structure (Eyes/Nose) 
+    // and LESS about the jaw (which moves when talking)
+    const weights = [2.0, 2.0, 1.0, 1.5, 1.0, 1.0]; 
 
     for (const [name, savedLandmarks] of Object.entries(registry)) {
-        const savedVec = getFaceRatios(savedLandmarks);
-        const diff = calculateDifference(currentVec, savedVec);
+        const savedVec = getFaceVector(savedLandmarks);
         
-        // LOGIC: If difference is smaller than current best, update.
-        if (diff < bestMatch.score) {
-            bestMatch = { name: name, score: diff };
+        let weightedError = 0;
+        let totalWeight = 0;
+
+        for(let i=0; i<currentVec.length; i++) {
+            const diff = Math.abs(currentVec[i] - savedVec[i]);
+            weightedError += diff * weights[i];
+            totalWeight += weights[i];
+        }
+
+        const avgError = weightedError / totalWeight;
+
+        if (avgError < bestMatch.error) {
+            bestMatch = { name: name, error: avgError };
         }
     }
 
-    // --- THRESHOLD ---
-    // 0.0 = Identical
-    // 0.15 = Very close
-    // 0.3+ = Different person
-    if (bestMatch.score < 0.3) {
-        return { name: bestMatch.name, conf: Math.floor((1 - bestMatch.score) * 100) }; 
+    // --- Strict Thresholding ---
+    // With 3D math, the error is usually very low for the same person.
+    // 0.05 is a good tight threshold.
+    if (bestMatch.error < 0.08) {
+        // Convert low error to high confidence %
+        const confidence = Math.max(0, Math.floor((1 - (bestMatch.error / 0.1)) * 100));
+        return { name: bestMatch.name, conf: confidence }; 
     } else {
         return { name: "Unknown", conf: 0 };
     }
 }
 
+// --- Init MediaPipe ---
 async function init() {
     try {
         const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
@@ -162,7 +179,6 @@ async function predictVideo() {
         ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h);
         ctx.fillStyle = color; ctx.fillRect(x, y - 25, w, 25);
         ctx.fillStyle = "white"; ctx.font = "bold 14px monospace";
-        
         ctx.fillText(`${match.name}`, x + 5, y - 8);
 
         if (match.name !== "Unknown") {
