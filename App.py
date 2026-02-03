@@ -7,6 +7,7 @@ import pickle
 import time
 import hashlib
 from datetime import datetime
+import uuid  # Added for unique session IDs
 
 # --- CONFIGURATION ---
 DATA_DIR = "agnos_data"
@@ -37,6 +38,8 @@ if "org_key" not in st.session_state: st.session_state.org_key = None
 if "db" not in st.session_state: st.session_state.db = {}
 if "logged_set" not in st.session_state: st.session_state.logged_set = set()
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
+# CRITICAL FIX: Unique ID to force-kill the camera component on logout
+if "component_key" not in st.session_state: st.session_state.component_key = str(uuid.uuid4())
 
 # --- BACKEND LOGIC ---
 def load_org_data(org_key):
@@ -48,21 +51,23 @@ def load_org_data(org_key):
     else:
         st.session_state.db = {} 
     
-    # 2. Load Logs (CRITICAL FIX: Wipe logged_set first)
+    # 2. Wipe Logs Memory
     st.session_state.logged_set = set() 
     
+    # 3. Load Current Org Logs
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
             try:
                 logs = pickle.load(f)
-                today = datetime.now().strftime("%Y-%m-%d")
+                # We can only approximate "today" filtering here
+                today_server = datetime.now().strftime("%Y-%m-%d")
                 for entry in logs:
-                    if entry["Date"] == today:
+                    if entry["Date"] == today_server:
                         st.session_state.logged_set.add(entry["Name"])
             except Exception:
                 pass 
 
-def save_log(name):
+def save_log(name, date_str, time_str):
     if not st.session_state.auth_status: return False
     
     paths = get_file_paths(st.session_state.org_key)
@@ -70,10 +75,13 @@ def save_log(name):
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f: logs = pickle.load(f)
     
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    if not any(e['Name'] == name and e['Date'] == today for e in logs):
-        entry = {"Name": name, "Time": datetime.now().strftime("%H:%M:%S"), "Date": today}
+    # Check duplicate entry for specific Date (Client Side Date)
+    if not any(e['Name'] == name and e['Date'] == date_str for e in logs):
+        entry = {
+            "Name": name, 
+            "Time": time_str, 
+            "Date": date_str
+        }
         logs.append(entry)
         with open(paths["logs"], "wb") as f: pickle.dump(logs, f)
         st.session_state.logged_set.add(name)
@@ -81,10 +89,14 @@ def save_log(name):
     return False
 
 # --- AUTO-LOGGING TRIGGER ---
-if "detected_name" in st.query_params:
-    det_name = st.query_params["detected_name"]
+qp = st.query_params
+if "detected_name" in qp:
+    det_name = qp["detected_name"]
+    c_date = qp.get("c_date", datetime.now().strftime("%Y-%m-%d"))
+    c_time = qp.get("c_time", datetime.now().strftime("%H:%M:%S"))
+
     if st.session_state.auth_status and det_name and det_name != "Unknown":
-        if save_log(det_name):
+        if save_log(det_name, c_date, c_time):
             st.toast(f"✅ Verified: {det_name}", icon="🔐")
 
 # --- CSS STYLING ---
@@ -96,6 +108,22 @@ st.markdown("""
     video { position:absolute; top:0; left:0; z-index:5; }
     .stDeployButton {display:none;}
     div[data-testid="stForm"] { border: 1px solid #333; padding: 20px; border-radius: 10px; }
+    
+    /* Tabs Styling */
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: transparent;
+        border-radius: 4px 4px 0px 0px;
+        color: #fff;
+        font-weight: 600;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1f2937;
+        color: #00FF00;
+        border-bottom: 2px solid #00FF00;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -200,7 +228,6 @@ async function predictVideo() {
             const landmarks = results.faceLandmarks[0];
             const name = findMatch(landmarks);
 
-            // --- STABILITY LOGIC ---
             if (name !== currentMatch) {
                 currentMatch = name;
                 matchStartTime = now;
@@ -210,13 +237,21 @@ async function predictVideo() {
             const isUnknown = (currentMatch === "Unknown");
             const isVerified = (!isUnknown && timeElapsed > 1000); 
 
-            // --- TRIGGER PYTHON (Once Verified) ---
             if (isVerified) {
                 try {
                     const url = new URL(window.parent.location.href);
                     if (url.searchParams.get("detected_name") !== currentMatch) {
                         url.searchParams.set("detected_name", currentMatch);
+                        
+                        // Set Client Time
+                        const d = new Date();
+                        const dateStr = d.getFullYear() + "-" + (d.getMonth()+1).toString().padStart(2, '0') + "-" + d.getDate().toString().padStart(2, '0');
+                        const timeStr = d.getHours().toString().padStart(2, '0') + ":" + d.getMinutes().toString().padStart(2, '0') + ":" + d.getSeconds().toString().padStart(2, '0');
+                        
+                        url.searchParams.set("c_date", dateStr);
+                        url.searchParams.set("c_time", timeStr);
                         url.searchParams.set("ts", Date.now()); 
+                        
                         window.parent.history.replaceState({}, "", url);
                         if(triggerBtn) triggerBtn.click();
                     }
@@ -228,15 +263,15 @@ async function predictVideo() {
             const ys = landmarks.map(p => p.y * canvas.height);
             const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
             
-            let color = "#FF0000"; // Red
+            let color = "#FF0000"; 
             let label = "UNKNOWN";
 
             if (!isUnknown) {
                 if (isVerified) {
-                    color = "#00FF00"; // Green
+                    color = "#00FF00"; 
                     label = currentMatch; 
                 } else {
-                    color = "#FFFF00"; // Yellow
+                    color = "#FFFF00"; 
                     label = "VERIFYING..."; 
                 }
             }
@@ -291,17 +326,16 @@ def get_component_html(img_b64=None):
     """
     return html
 
-# --- LOGIN SCREEN LOGIC ---
+# --- LOGIN SCREEN ---
 if not st.session_state.auth_status:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.title("🔐 Agnos Login")
         st.markdown("Enter your Organization Key to proceed.")
         
-        # KEY INPUT (Outside Form to allow dynamic checking)
+        # KEY INPUT
         key_in = st.text_input("Organization Key (5 Char)", max_chars=5, placeholder="e.g. ALPHA").upper()
         
-        # Check logic
         auth_db = load_auth()
         is_known = False
         if len(key_in) == 5:
@@ -312,7 +346,6 @@ if not st.session_state.auth_status:
             else:
                 st.warning(f"🆕 Organization **{key_in}** is available!")
 
-            # PASSWORD FORM
             with st.form("auth_form"):
                 btn_label = "Sign In" if is_known else "Sign Up & Create"
                 pass_label = "Enter Password" if is_known else "Create New Password"
@@ -327,50 +360,50 @@ if not st.session_state.auth_status:
                         hashed_pw = hashlib.sha256(pass_in.encode()).hexdigest()
                         
                         if is_known:
-                            # LOGIN
                             if auth_db[key_in] == hashed_pw:
                                 st.session_state.auth_status = True
                                 st.session_state.org_key = key_in
+                                # Generate NEW component key to force iframe rebuild
+                                st.session_state.component_key = str(uuid.uuid4())
                                 load_org_data(key_in)
                                 st.rerun()
                             else:
                                 st.error("❌ Incorrect Password")
                         else:
-                            # SIGNUP
                             auth_db[key_in] = hashed_pw
                             save_auth(auth_db)
                             st.session_state.auth_status = True
                             st.session_state.org_key = key_in
-                            load_org_data(key_in) # Loads empty DB
+                            st.session_state.component_key = str(uuid.uuid4())
+                            load_org_data(key_in) 
                             st.success("Organization Created!")
                             st.rerun()
 
 else:
     # --- LOGGED IN UI ---
     
-    # SIDEBAR NAVIGATION
     with st.sidebar:
         st.title("🛡️ Agnos")
         st.caption(f"Org: {st.session_state.org_key}")
-        
-        nav = st.radio("Navigation", ["Scanner", "Register", "Logs", "Database"])
-        
+        st.metric("Users", len(st.session_state.db))
+        st.metric("Logs Today", len(st.session_state.logged_set))
         st.markdown("---")
         if st.button("Log Out"):
             st.session_state.auth_status = False
             st.session_state.org_key = None
             st.session_state.db = {}
-            st.session_state.logged_set = set() # Reset logs on logout
+            st.session_state.logged_set = set()
             st.rerun()
 
-    # MAIN CONTENT
+    st.title("Agnos Enterprise Biometrics")
     
-    # 1. SCANNER
-    if nav == "Scanner":
-        st.title("🎥 Live Biometric Scanner")
-        
+    tab_scan, tab_reg, tab_logs, tab_db = st.tabs(["🎥 Scanner", "👤 Register", "📊 Logs", "🗄️ Database"])
+
+    # TAB 1: SCANNER
+    with tab_scan:
         c_vid, c_stat = st.columns([2, 1])
         with c_vid:
+            # FORCE REBUILD ON ORG CHANGE
             st.components.v1.html(get_component_html(), height=500)
         with c_stat:
             st.subheader("Live Feed")
@@ -378,14 +411,15 @@ else:
                 det = st.query_params["detected_name"]
                 st.success(f"**ACCESS GRANTED**")
                 st.markdown(f"<h1 style='font-size:3em;'>{det}</h1>", unsafe_allow_html=True)
+                if "c_time" in st.query_params:
+                    st.caption(f"Logged at {st.query_params['c_time']}")
             else:
                 st.info("System Active")
                 st.markdown("*Waiting for personnel...*")
 
-    # 2. REGISTER
-    elif nav == "Register":
-        st.title("👤 Register New Personnel")
-        
+    # TAB 2: REGISTER
+    with tab_reg:
+        st.subheader("Register New Personnel")
         c1, c2 = st.columns([2, 1])
         with c1:
             name_in = st.text_input("Full Name", key=f"n_{st.session_state.uploader_key}").upper()
@@ -394,6 +428,7 @@ else:
             if file_in:
                 st.image(file_in, width=200, caption="Preview")
                 b64 = base64.b64encode(file_in.getvalue()).decode()
+                # Use component key to ensure this iframe is also isolated
                 st.components.v1.html(get_component_html(b64), height=0, width=0)
                 
                 if "face_data" in st.query_params:
@@ -401,7 +436,6 @@ else:
                         data = json.loads(base64.b64decode(st.query_params["face_data"]).decode())
                         st.session_state.db[name_in] = data
                         
-                        # Save to isolated Org file
                         paths = get_file_paths(st.session_state.org_key)
                         with open(paths["db"], "w") as f: json.dump(st.session_state.db, f)
                         
@@ -411,14 +445,14 @@ else:
                         st.rerun()
                 else: st.info("Analyzing biometrics...")
 
-    # 3. LOGS
-    elif nav == "Logs":
-        st.title("📊 Attendance Logs")
+    # TAB 3: LOGS
+    with tab_logs:
+        st.subheader(f"Logs for Org: {st.session_state.org_key}")
         paths = get_file_paths(st.session_state.org_key)
         
         c_ref, c_clr = st.columns([1, 1])
         with c_ref:
-            if st.button("Refresh"): st.rerun()
+            if st.button("Refresh Logs"): st.rerun()
         with c_clr:
             if st.button("Clear History"):
                 if os.path.exists(paths["logs"]): os.remove(paths["logs"])
@@ -433,16 +467,16 @@ else:
             else: st.info("No logs found.")
         else: st.info("No logs found.")
         
-    # 4. DATABASE MANAGEMENT
-    elif nav == "Database":
-        st.title("🗄️ Database Management")
-        st.warning("Deleting a user here removes them permanently from this Organization's registry.")
+    # TAB 4: DATABASE
+    with tab_db:
+        st.subheader("Manage Database")
+        st.warning("Deleting a user here removes them permanently.")
         
         if st.session_state.db:
             for name in list(st.session_state.db.keys()):
                 c1, c2 = st.columns([3,1])
                 c1.text(f"👤 {name}")
-                if c2.button("Delete User", key=f"del_{name}"):
+                if c2.button("Delete", key=f"del_{name}"):
                     del st.session_state.db[name]
                     paths = get_file_paths(st.session_state.org_key)
                     with open(paths["db"], "w") as f: json.dump(st.session_state.db, f)
