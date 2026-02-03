@@ -42,13 +42,14 @@ if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 # --- BACKEND LOGIC ---
 def load_org_data(org_key):
     paths = get_file_paths(org_key)
-    # Load Faces
+    
+    # 1. Load Faces (Strict Isolation)
     if os.path.exists(paths["db"]):
         with open(paths["db"], "r") as f: st.session_state.db = json.load(f)
     else:
-        st.session_state.db = {}
+        st.session_state.db = {} # Start fresh for this Org
     
-    # Load Logs (to populate 'logged_set' for today)
+    # 2. Load Logs
     st.session_state.logged_set = set()
     if os.path.exists(paths["logs"]):
         with open(paths["logs"], "rb") as f:
@@ -200,7 +201,6 @@ async function predictVideo() {
             const name = findMatch(landmarks);
 
             // --- STABILITY LOGIC ---
-            // If the name changed (or went to Unknown), reset the timer
             if (name !== currentMatch) {
                 currentMatch = name;
                 matchStartTime = now;
@@ -208,16 +208,14 @@ async function predictVideo() {
 
             const timeElapsed = now - matchStartTime;
             const isUnknown = (currentMatch === "Unknown");
-            const isVerified = (!isUnknown && timeElapsed > 1000); // 1 Second Threshold
+            const isVerified = (!isUnknown && timeElapsed > 1000); 
 
             // --- TRIGGER PYTHON (Once Verified) ---
             if (isVerified) {
                 try {
                     const url = new URL(window.parent.location.href);
-                    // Only trigger if URL is different to avoid loop spam
                     if (url.searchParams.get("detected_name") !== currentMatch) {
                         url.searchParams.set("detected_name", currentMatch);
-                        // Add timestamp to force Streamlit to recognize the change event
                         url.searchParams.set("ts", Date.now()); 
                         window.parent.history.replaceState({}, "", url);
                         if(triggerBtn) triggerBtn.click();
@@ -225,34 +223,31 @@ async function predictVideo() {
                 } catch(e) {}
             }
 
-            // --- DRAWING LOGIC (Red -> Yellow -> Green) ---
+            // --- DRAWING LOGIC ---
             const xs = landmarks.map(p => p.x * canvas.width);
             const ys = landmarks.map(p => p.y * canvas.height);
             const x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs)-x, h = Math.max(...ys)-y;
             
-            let color = "#FF0000"; // Default Red
+            let color = "#FF0000"; // Red
             let label = "UNKNOWN";
 
             if (!isUnknown) {
                 if (isVerified) {
                     color = "#00FF00"; // Green
-                    label = currentMatch; // Show Name
+                    label = currentMatch; 
                 } else {
                     color = "#FFFF00"; // Yellow
-                    label = "VERIFYING..."; // Show Verifying
+                    label = "VERIFYING..."; 
                 }
             }
 
-            // Box
             ctx.strokeStyle = color;
             ctx.lineWidth = 4;
             ctx.strokeRect(x, y, w, h);
             
-            // Label Background
             ctx.fillStyle = color;
             ctx.fillRect(x, y - 30, w, 30);
             
-            // Label Text
             ctx.fillStyle = "#000";
             ctx.font = "bold 16px sans-serif";
             ctx.fillText(label, x + 5, y - 8);
@@ -296,79 +291,74 @@ def get_component_html(img_b64=None):
     """
     return html
 
-# --- UI LAYOUT ---
-
-# 1. AUTHENTICATION SIDEBAR
-with st.sidebar:
-    st.title("🔐 Agnos Auth")
-    
-    # If not logged in, show login form
-    if not st.session_state.auth_status:
+# --- LOGIN SCREEN LOGIC ---
+if not st.session_state.auth_status:
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        st.title("🔐 Agnos Login")
+        st.markdown("Enter your Organization Key to access or create your secure database.")
+        
         with st.form("login_form"):
             key_in = st.text_input("Organization Key (5 Char)", max_chars=5).upper()
-            pass_in = st.text_input("Password", type="password")
             
-            # Auth Logic
-            if st.form_submit_button("Access Database"):
-                auth_db = load_auth()
-                
-                # Check if Key exists
-                if key_in in auth_db:
-                    if auth_db[key_in] == hashlib.sha256(pass_in.encode()).hexdigest():
-                        st.session_state.auth_status = True
-                        st.session_state.org_key = key_in
-                        load_org_data(key_in)
-                        st.success("Login Successful")
-                        st.rerun()
-                    else:
-                        st.error("Invalid Password")
+            # Check if key exists to show correct prompt
+            auth_db = load_auth()
+            key_exists = key_in in auth_db
+            
+            pass_label = "Enter Password" if key_exists else "Create Password (New Org)"
+            pass_in = st.text_input(pass_label, type="password")
+            
+            submitted = st.form_submit_button("Access System")
+            
+            if submitted:
+                if len(key_in) != 5:
+                    st.error("Key must be exactly 5 characters.")
+                elif len(pass_in) == 0:
+                    st.error("Password cannot be empty.")
                 else:
-                    # New Organization?
-                    if len(key_in) == 5 and len(pass_in) > 0:
-                        st.info("Creating New Database...")
+                    if key_exists:
+                        # VERIFY PASSWORD
+                        if auth_db[key_in] == hashlib.sha256(pass_in.encode()).hexdigest():
+                            st.session_state.auth_status = True
+                            st.session_state.org_key = key_in
+                            load_org_data(key_in)
+                            st.rerun()
+                        else:
+                            st.error("Incorrect Password.")
+                    else:
+                        # REGISTER NEW ORG
                         auth_db[key_in] = hashlib.sha256(pass_in.encode()).hexdigest()
                         save_auth(auth_db)
                         st.session_state.auth_status = True
                         st.session_state.org_key = key_in
-                        st.session_state.db = {} # New DB
-                        st.success(f"Created Org: {key_in}")
+                        # Init Empty DB for this Org
+                        st.session_state.db = {} 
+                        st.success("New Organization Created!")
                         st.rerun()
-                    else:
-                        st.error("Enter valid Key & Password")
-    else:
-        # Logged In View
-        st.success(f"Org: {st.session_state.org_key}")
+
+else:
+    # --- LOGGED IN UI ---
+    
+    # SIDEBAR NAVIGATION
+    with st.sidebar:
+        st.title("🛡️ Agnos")
+        st.caption(f"Org: {st.session_state.org_key}")
         
-        c1, c2 = st.columns(2)
-        c1.metric("Users", len(st.session_state.db))
-        c2.metric("Logs", len(st.session_state.logged_set))
+        nav = st.radio("Navigation", ["Scanner", "Register", "Logs", "Database"])
         
+        st.markdown("---")
         if st.button("Log Out"):
             st.session_state.auth_status = False
             st.session_state.org_key = None
             st.session_state.db = {}
             st.rerun()
-            
-        st.markdown("---")
-        with st.expander("Manage Database"):
-            if st.session_state.db:
-                for name in list(st.session_state.db.keys()):
-                    c1, c2 = st.columns([3,1])
-                    c1.text(name)
-                    if c2.button("✖", key=f"del_{name}"):
-                        del st.session_state.db[name]
-                        paths = get_file_paths(st.session_state.org_key)
-                        with open(paths["db"], "w") as f: json.dump(st.session_state.db, f)
-                        st.rerun()
 
-# 2. MAIN APP
-st.title("Agnos Enterprise Biometrics")
-
-if st.session_state.auth_status:
-    tab_scan, tab_reg, tab_logs = st.tabs(["🎥 Live Scanner", "👤 Registration", "📊 Logs"])
-
-    # TAB 1: SCANNER
-    with tab_scan:
+    # MAIN CONTENT
+    
+    # 1. SCANNER
+    if nav == "Scanner":
+        st.title("🎥 Live Biometric Scanner")
+        
         c_vid, c_stat = st.columns([2, 1])
         with c_vid:
             st.components.v1.html(get_component_html(), height=500)
@@ -382,9 +372,10 @@ if st.session_state.auth_status:
                 st.info("System Active")
                 st.markdown("*Waiting for personnel...*")
 
-    # TAB 2: REGISTRATION
-    with tab_reg:
-        st.subheader("Register New Personnel")
+    # 2. REGISTER
+    elif nav == "Register":
+        st.title("👤 Register New Personnel")
+        
         c1, c2 = st.columns([2, 1])
         with c1:
             name_in = st.text_input("Full Name", key=f"n_{st.session_state.uploader_key}").upper()
@@ -400,7 +391,7 @@ if st.session_state.auth_status:
                         data = json.loads(base64.b64decode(st.query_params["face_data"]).decode())
                         st.session_state.db[name_in] = data
                         
-                        # Save to specific Org File
+                        # Save to isolated Org file
                         paths = get_file_paths(st.session_state.org_key)
                         with open(paths["db"], "w") as f: json.dump(st.session_state.db, f)
                         
@@ -410,16 +401,16 @@ if st.session_state.auth_status:
                         st.rerun()
                 else: st.info("Analyzing biometrics...")
 
-    # TAB 3: LOGS
-    with tab_logs:
-        st.subheader(f"Logs for Org: {st.session_state.org_key}")
+    # 3. LOGS
+    elif nav == "Logs":
+        st.title("📊 Attendance Logs")
         paths = get_file_paths(st.session_state.org_key)
         
         c_ref, c_clr = st.columns([1, 1])
         with c_ref:
-            if st.button("Refresh Logs"): st.rerun()
+            if st.button("Refresh"): st.rerun()
         with c_clr:
-            if st.button("Clear Logs"):
+            if st.button("Clear History"):
                 if os.path.exists(paths["logs"]): os.remove(paths["logs"])
                 st.session_state.logged_set = set()
                 st.rerun()
@@ -429,7 +420,23 @@ if st.session_state.auth_status:
             if not df.empty:
                 st.dataframe(df, use_container_width=True)
                 st.download_button("Download CSV", df.to_csv(index=False), f"logs_{st.session_state.org_key}.csv", "text/csv")
-            else: st.info("Empty logs.")
+            else: st.info("No logs found.")
         else: st.info("No logs found.")
-else:
-    st.info("Please login using the sidebar to access the biometric system.")
+        
+    # 4. DATABASE MANAGEMENT
+    elif nav == "Database":
+        st.title("🗄️ Database Management")
+        st.warning("Deleting a user here removes them permanently from this Organization's registry.")
+        
+        if st.session_state.db:
+            for name in list(st.session_state.db.keys()):
+                c1, c2 = st.columns([3,1])
+                c1.text(f"👤 {name}")
+                if c2.button("Delete User", key=f"del_{name}"):
+                    del st.session_state.db[name]
+                    paths = get_file_paths(st.session_state.org_key)
+                    with open(paths["db"], "w") as f: json.dump(st.session_state.db, f)
+                    st.success(f"Deleted {name}")
+                    st.rerun()
+        else:
+            st.info("Database is empty.")
