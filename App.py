@@ -1,144 +1,184 @@
+import os
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+
 import streamlit as st
 import pandas as pd
-import json
-import os
-import base64
-import time
+import cv2
+import numpy as np
+import pickle
 import hashlib
-import uuid
 from datetime import datetime
+from deepface import DeepFace
 
-# --- 1. CONFIGURATION & ASSETS ---
+# WebRTC Imports
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
+
+# --- 1. CONFIGURATION ---
 DATA_DIR = "agnos_data"
 if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 AUTH_FILE = os.path.join(DATA_DIR, "auth_registry.json")
 
-def load_asset(filename):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(script_dir, "assets", filename)
-    try:
-        with open(file_path, "r") as f: return f.read()
-    except FileNotFoundError: return ""
+# Required for Cloud Deployment (STUN servers help WebRTC connect over the internet)
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
 st.set_page_config(page_title="Agnos Enterprise", layout="wide", initial_sidebar_state="expanded")
-st.markdown(f"<style>{load_asset('style.css')}</style>", unsafe_allow_html=True)
+
+# --- Math Helper for DeepFace ---
+def cosine_distance(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 # --- 2. BACKEND HELPERS ---
 def load_auth():
     if os.path.exists(AUTH_FILE):
+        import json
         with open(AUTH_FILE, "r") as f: return json.load(f)
     return {}
 
 def save_auth(data):
+    import json
     with open(AUTH_FILE, "w") as f: json.dump(data, f)
 
 def get_file_paths(org_key):
     return {
-        "db": os.path.join(DATA_DIR, f"faces_{org_key}.json"),
+        "db": os.path.join(DATA_DIR, f"faces_{org_key}.pkl"),
         "logs": os.path.join(DATA_DIR, f"logs_{org_key}.csv")
     }
 
-# --- 3. SESSION STATE ---
+# --- 3. SESSION STATE & LOGIN PERSISTENCE ---
 if "auth_status" not in st.session_state: st.session_state.auth_status = False
 if "org_key" not in st.session_state: st.session_state.org_key = None
-if "db" not in st.session_state: st.session_state.db = {}
+if "known_names" not in st.session_state: st.session_state.known_names = []
+if "known_encodings" not in st.session_state: st.session_state.known_encodings = []
 if "logged_set" not in st.session_state: st.session_state.logged_set = set()
-if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
-if "component_key" not in st.session_state: st.session_state.component_key = str(uuid.uuid4())
-if "last_toast" not in st.session_state: st.session_state.last_toast = 0
 
-# --- 4. DATA LOGIC ---
 def load_org_data(org_key):
-    st.session_state.logged_set = set()
-    st.session_state.db = {}
-    
     paths = get_file_paths(org_key)
+    st.session_state.known_names = []
+    st.session_state.known_encodings = []
+    st.session_state.logged_set = set()
     
-    # Load Faces
     if os.path.exists(paths["db"]):
-        with open(paths["db"], "r") as f: st.session_state.db = json.load(f)
+        with open(paths["db"], "rb") as f:
+            data = pickle.load(f)
+            st.session_state.known_names = data.get("names", [])
+            st.session_state.known_encodings = data.get("encodings", [])
     
-    # Load Logs Cache
-    if os.path.exists(paths["logs"]):
+    if os.path.exists(paths["logs"]) and os.path.getsize(paths["logs"]) > 0:
         try:
-            # Check if file is not empty
-            if os.path.getsize(paths["logs"]) > 0:
-                df = pd.read_csv(paths["logs"])
-                # Cache today's names to prevent duplicate logging
-                today = datetime.now().strftime("%Y-%m-%d")
-                todays_names = df[df['Date'] == today]['Name'].unique()
-                st.session_state.logged_set = set(todays_names)
+            df = pd.read_csv(paths["logs"])
+            today = datetime.now().strftime("%Y-%m-%d")
+            todays_names = df[df['Date'] == today]['Name'].unique()
+            st.session_state.logged_set = set(todays_names)
         except Exception as e:
-            print(f"Error loading logs: {e}")
+            pass
 
-def save_log(name, date_str, time_str):
-    if not st.session_state.auth_status: return False
-    
-    # RAM Check: If already logged today, return False
-    if name in st.session_state.logged_set:
-        return False
-
-    paths = get_file_paths(st.session_state.org_key)
-    csv_path = paths["logs"]
-    
-    try:
-        # Check if we need a header (File doesn't exist OR is empty)
-        write_header = (not os.path.exists(csv_path)) or (os.path.getsize(csv_path) == 0)
-        
-        with open(csv_path, "a") as f:
-            if write_header:
-                f.write("Name,Time,Date\n")
-            f.write(f"{name},{time_str},{date_str}\n")
-            
-        st.session_state.logged_set.add(name)
-        return True
-    except Exception as e:
-        print(f"Save Error: {e}")
-        return False
-
-# --- 5. COMPONENT BUILDER ---
-def get_component_html(img_b64=None):
-    if not st.session_state.auth_status: return "<div>Please Login</div>"
-    
-    html_template = load_asset("script.html")
-    db_json = json.dumps(st.session_state.db)
-    img_val = f"data:image/jpeg;base64,{img_b64}" if img_b64 else "null"
-    run_mode = "IMAGE" if img_b64 else "VIDEO"
-    display_video = "none" if img_b64 else "block"
-    display_img = "block" if img_b64 else "none"
-
-    return html_template.replace("STATIC_IMG_PLACEHOLDER", img_val) \
-                        .replace("RUN_MODE_PLACEHOLDER", run_mode) \
-                        .replace("DB_JSON_PLACEHOLDER", db_json) \
-                        .replace("{'none' if img_b64 else 'block'}", display_video) \
-                        .replace("{'block' if img_b64 else 'none'}", display_img)
-
-# --- 6. LOGIC TRIGGER ---
-qp = st.query_params
-if "detected_name" in qp:
-    det_name = qp["detected_name"]
-    c_date = qp.get("c_date", datetime.now().strftime("%Y-%m-%d"))
-    c_time = qp.get("c_time", datetime.now().strftime("%H:%M:%S"))
-
-    if st.session_state.auth_status and det_name and det_name != "Unknown":
-        
-        # 1. Try to Save
-        saved_new = save_log(det_name, c_date, c_time)
-        
-        # 2. Feedback (Always show if present in URL)
-        if saved_new:
-            st.toast(f"✅ Attendance Marked: {det_name}", icon="⚡")
-        else:
-            # If already saved, show "Welcome Back"
-            st.toast(f"👋 Welcome back: {det_name}", icon="👀")
-
-    # Note: We do NOT clear query_params here. 
-    # We let the JS clear them when the user walks away.
-    # This keeps the "Toast" visible as long as the user stands there.
-            
-# --- 7. UI ---
+# AUTO-LOGIN CHECK (Survives F5 Reloads)
 if not st.session_state.auth_status:
-    # LOGIN SCREEN
+    if "org" in st.query_params and "token" in st.query_params:
+        q_org = st.query_params["org"]
+        q_token = st.query_params["token"]
+        auth_db = load_auth()
+        if q_org in auth_db and auth_db[q_org] == q_token:
+            st.session_state.auth_status = True
+            st.session_state.org_key = q_org
+            load_org_data(q_org)
+
+def save_face_data():
+    paths = get_file_paths(st.session_state.org_key)
+    data = {"names": st.session_state.known_names, "encodings": st.session_state.known_encodings}
+    with open(paths["db"], "wb") as f: pickle.dump(data, f)
+
+# --- 4. WEBRTC THREAD PROCESSOR ---
+# Note: This runs in a background thread. It cannot easily access st.session_state directly.
+class FaceRecognitionProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.known_names = []
+        self.known_encodings = []
+        self.org_key = None
+        self.frame_count = 0
+        self.face_locations = []
+        self.face_names = []
+
+    def log_attendance_thread_safe(self, name):
+        if not self.org_key or name == "Unknown": return
+        
+        paths = get_file_paths(self.org_key)
+        csv_path = paths["logs"]
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        
+        # Quick check if already logged today (thread-safe-ish read)
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            try:
+                with open(csv_path, "r") as f:
+                    lines = f.readlines()
+                    for line in lines:
+                        if name in line and date_str in line: return # Already logged
+            except: pass
+
+        # Write to log
+        write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+        time_str = now.strftime("%H:%M:%S")
+        with open(csv_path, "a") as f:
+            if write_header: f.write("Name,Time,Date\n")
+            f.write(f"{name},{time_str},{date_str}\n")
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        self.frame_count += 1
+
+        # Process every 5th frame to prevent massive lag
+        if self.frame_count % 5 == 0:
+            small_frame = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
+            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+
+            try:
+                objs = DeepFace.represent(img_path=rgb_small_frame, model_name="Facenet", enforce_detection=True)
+                self.face_locations = []
+                self.face_names = []
+
+                for obj in objs:
+                    encoding = obj["embedding"]
+                    area = obj["facial_area"]
+                    left, top, w, h = area['x']*2, area['y']*2, area['w']*2, area['h']*2
+                    right, bottom = left + w, top + h
+                    self.face_locations.append((top, right, bottom, left))
+
+                    name = "Unknown"
+                    best_dist = 0.40 # Facenet Threshold
+
+                    for known_name, known_enc in zip(self.known_names, self.known_encodings):
+                        dist = cosine_distance(encoding, known_enc)
+                        if dist < best_dist:
+                            best_dist = dist
+                            name = known_name
+
+                    self.face_names.append(name)
+                    if name != "Unknown":
+                        self.log_attendance_thread_safe(name)
+
+            except ValueError:
+                self.face_locations = []
+                self.face_names = []
+
+        # Draw boxes (always runs on every frame to keep video smooth)
+        for (top, right, bottom, left), name in zip(self.face_locations, self.face_names):
+            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+            cv2.rectangle(img, (left, top), (right, bottom), color, 2)
+            cv2.rectangle(img, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+            cv2.putText(img, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+
+# --- 5. UI ---
+if not st.session_state.auth_status:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.title("🔐 Agnos Login")
@@ -155,122 +195,102 @@ if not st.session_state.auth_status:
             pw = st.text_input("Password", type="password")
             if st.form_submit_button(btn, type="primary"):
                 h_pw = hashlib.sha256(pw.encode()).hexdigest()
-                if is_known:
-                    if auth_db[key_in] == h_pw:
-                        st.session_state.auth_status = True
-                        st.session_state.org_key = key_in
-                        st.session_state.component_key = str(uuid.uuid4())
-                        load_org_data(key_in)
-                        st.rerun()
-                    else: st.error("Wrong Password")
+                if is_known and auth_db[key_in] != h_pw:
+                    st.error("Wrong Password")
                 else:
-                    auth_db[key_in] = h_pw
-                    save_auth(auth_db)
+                    if not is_known:
+                        auth_db[key_in] = h_pw
+                        save_auth(auth_db)
+                    
                     st.session_state.auth_status = True
                     st.session_state.org_key = key_in
-                    st.session_state.component_key = str(uuid.uuid4())
+                    
+                    # Set URL Params for persistence
+                    st.query_params["org"] = key_in
+                    st.query_params["token"] = h_pw
+                    
                     load_org_data(key_in)
                     st.rerun()
 else:
-    # DASHBOARD
     with st.sidebar:
         st.title("🛡️ Agnos")
         st.caption(f"ORG: {st.session_state.org_key}")
-        st.metric("Users", len(st.session_state.db))
-        st.metric("Logs Today", len(st.session_state.logged_set))
+        st.metric("Users", len(st.session_state.known_names))
         st.markdown("---")
-        
         if st.button("Log Out"):
+            st.query_params.clear() # Clear cookies
             for k in list(st.session_state.keys()): del st.session_state[k]
-            st.query_params.clear()
-            st.markdown("""<meta http-equiv="refresh" content="0"><script>parent.window.location.reload();</script>""", unsafe_allow_html=True)
-            st.stop()
+            st.rerun()
 
-        with st.expander("⚠️ Danger Zone"):
-            if st.button("DELETE ORG", type="primary"):
-                paths = get_file_paths(st.session_state.org_key)
-                if os.path.exists(paths['db']): os.remove(paths['db'])
-                if os.path.exists(paths['logs']): os.remove(paths['logs'])
-                auth_db = load_auth()
-                if st.session_state.org_key in auth_db:
-                    del auth_db[st.session_state.org_key]
-                    save_auth(auth_db)
-                for k in list(st.session_state.keys()): del st.session_state[k]
-                st.query_params.clear()
-                st.markdown("""<meta http-equiv="refresh" content="0"><script>parent.window.location.reload();</script>""", unsafe_allow_html=True)
-                st.stop()
-
-    st.title("Agnos Enterprise")
-    tab1, tab2, tab3, tab4 = st.tabs(["🎥 Scanner", "👤 Register", "📊 Logs", "🗄️ Database"])
+    st.title("Agnos Enterprise (WebRTC + DeepFace)")
+    tab1, tab2, tab3, tab4 = st.tabs(["🎥 Live Scanner", "👤 Register", "📊 Logs", "🗄️ Database"])
 
     with tab1:
-        c1, c2 = st.columns([2,1])
-        with c1: st.components.v1.html(get_component_html(), height=530)
-        with c2:
-            st.subheader("Live Status")
-            if "detected_name" in st.query_params:
-                det = st.query_params["detected_name"]
-                st.success("**ACCESS GRANTED**")
-                st.markdown(f"<h1 style='font-size:3em; color:#4ade80;'>{det}</h1>", unsafe_allow_html=True)
-                if "c_time" in st.query_params:
-                    st.caption(f"Last Scan: {st.query_params['c_time']}")
-            else:
-                st.info("System Active")
-                st.markdown("*Waiting for personnel...*")
-    
+        st.markdown("### WebRTC Scanner")
+        st.caption("Video processing runs directly in your browser. Start the stream below.")
+        
+        ctx = webrtc_streamer(
+            key="face-recognition",
+            mode=1, # SENDRECV
+            rtc_configuration=RTC_CONFIGURATION,
+            video_processor_factory=FaceRecognitionProcessor,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True
+        )
+
+        # Inject current state into the WebRTC thread if it's running
+        if ctx.video_processor:
+            ctx.video_processor.known_names = st.session_state.known_names
+            ctx.video_processor.known_encodings = st.session_state.known_encodings
+            ctx.video_processor.org_key = st.session_state.org_key
+
     with tab2:
-        c1, c2 = st.columns([2,1])
-        with c1:
-            name_in = st.text_input("Name", key=f"n_{st.session_state.uploader_key}").upper()
-            file_in = st.file_uploader("Photo", type=['jpg','png'], key=f"u_{st.session_state.uploader_key}")
-        with c2:
-            if file_in:
-                st.image(file_in, width=200)
-                b64 = base64.b64encode(file_in.getvalue()).decode()
-                st.components.v1.html(get_component_html(b64), height=0, width=0)
-                if "face_data" in st.query_params:
-                    if st.button("Save User", type="primary"):
-                        data = json.loads(base64.b64decode(st.query_params["face_data"]).decode())
-                        st.session_state.db[name_in] = data
-                        paths = get_file_paths(st.session_state.org_key)
-                        with open(paths["db"], "w") as f: json.dump(st.session_state.db, f)
-                        st.session_state.uploader_key += 1
-                        st.query_params.clear()
-                        st.toast(f"Saved {name_in}!")
-                        st.rerun()
-                else: st.info("Processing...")
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            new_name = st.text_input("Employee Name").upper()
+            photo_file = st.camera_input("Take a photo") or st.file_uploader("Upload a photo", type=["jpg", "png", "jpeg"])
+            
+            if photo_file and new_name:
+                if st.button("Register Face", type="primary"):
+                    with st.spinner("Analyzing face..."):
+                        bytes_data = photo_file.getvalue()
+                        cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+                        rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+                        
+                        try:
+                            objs = DeepFace.represent(img_path=rgb_img, model_name="Facenet", enforce_detection=True)
+                            if len(objs) > 1:
+                                st.error("Multiple faces found! Please ensure only one person is in the frame.")
+                            else:
+                                st.session_state.known_names.append(new_name)
+                                st.session_state.known_encodings.append(objs[0]["embedding"])
+                                save_face_data()
+                                st.success(f"Successfully registered {new_name}!")
+                                st.rerun()
+                        except ValueError:
+                            st.error("No face found! Please try again with better lighting.")
 
     with tab3:
         paths = get_file_paths(st.session_state.org_key)
-        c1, c2 = st.columns([1,1])
-        if c1.button("Refresh"): st.rerun()
-        if c2.button("Clear History"):
-            if os.path.exists(paths["logs"]): os.remove(paths["logs"])
-            st.session_state.logged_set = set()
-            st.rerun()
+        if st.button("Refresh Logs"): load_org_data(st.session_state.org_key) # Force reload CSV
         
-        if os.path.exists(paths["logs"]):
-            try:
-                # Debug read to ensure we see errors if CSV is malformed
-                df = pd.read_csv(paths["logs"])
-                if not df.empty:
-                    st.dataframe(df, use_container_width=True)
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button("Download CSV", csv, "logs.csv", "text/csv")
-                else:
-                    st.info("Log file exists but is empty.")
-            except Exception as e:
-                st.error(f"Error reading logs: {e}")
-        else: st.info("No logs found.")
+        if os.path.exists(paths["logs"]) and os.path.getsize(paths["logs"]) > 0:
+            df = pd.read_csv(paths["logs"])
+            # Reverse order to show newest first
+            st.dataframe(df.iloc[::-1], use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "logs.csv", "text/csv")
+        else:
+            st.info("No logs found.")
 
     with tab4:
-        if st.session_state.db:
-            for name in list(st.session_state.db.keys()):
-                c1, c2 = st.columns([3,1])
+        if st.session_state.known_names:
+            for idx, name in enumerate(st.session_state.known_names):
+                c1, c2 = st.columns([3, 1])
                 c1.text(f"👤 {name}")
-                if c2.button("Delete", key=f"d_{name}"):
-                    del st.session_state.db[name]
-                    paths = get_file_paths(st.session_state.org_key)
-                    with open(paths["db"], "w") as f: json.dump(st.session_state.db, f)
+                if c2.button("Delete", key=f"del_{idx}_{name}"):
+                    st.session_state.known_names.pop(idx)
+                    st.session_state.known_encodings.pop(idx)
+                    save_face_data()
                     st.rerun()
-        else: st.info("Database empty.")
+        else:
+            st.info("Database empty.")
