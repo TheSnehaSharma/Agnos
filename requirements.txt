@@ -1,6 +1,7 @@
 streamlit
 pandas
 numpy<2.0.0
-deepface
+face_recognition
 streamlit-webrtc
 av
+opencv-python-headless
