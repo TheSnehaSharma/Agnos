@@ -7,6 +7,7 @@ import hashlib
 import os
 import concurrent.futures
 from datetime import datetime
+import pytz
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 import av
 
@@ -82,9 +83,14 @@ def log_attendance_thread_safe(name, org_key):
     if name == "Unknown": return
     paths = get_file_paths(org_key)
     csv_path = paths["logs"]
-    now = datetime.now()
+    
+    # Force the server to pull the exact time for the local device timezone
+    local_tz = pytz.timezone('Asia/Kolkata') 
+    now = datetime.now(local_tz)
+    
     date_str, time_str = now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
 
+    # Prevent spam logging the same person on the same day
     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
         with open(csv_path, "r") as f:
             if any(name in line and date_str in line for line in f): return
@@ -108,8 +114,14 @@ class AsyncFaceProcessor:
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.ai_task = None
+        
+        # State Tracking
+        self.frame_count = 0
+        self.last_face = None # Stores the (x, y, w, h) of the single locked face
         self.current_name = "Finding Match..."
         self.box_color = (0, 255, 255) 
+        
+        # Database
         self.known_names = []
         self.known_encodings = []
         self.org_key = None
@@ -141,25 +153,37 @@ class AsyncFaceProcessor:
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        self.frame_count += 1
 
-        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        # Check if the AI finished processing the previous snapshot
+        if self.ai_task and self.ai_task.done():
+            result = self.ai_task.result()
+            self.current_name = result
+            self.box_color = (0, 255, 0) if result != "Unknown" else (0, 0, 255)
+            self.ai_task = None # Free up the background thread
 
-        if len(faces) == 0:
-            self.current_name = "Finding Match..."
-            self.box_color = (0, 255, 255)
+        # OPTIMIZATION 1: Only scan for faces every 3rd frame
+        if self.frame_count % 3 == 0:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
 
-        for (x, y, w, h) in faces:
+            if len(faces) > 0:
+                # OPTIMIZATION 2: If multiple faces, lock onto the largest one (closest to camera)
+                faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
+                self.last_face = faces[0]
+            else:
+                self.last_face = None
+                self.current_name = "Finding Match..."
+                self.box_color = (0, 255, 255)
+
+        # Draw the tracking box if we have a locked face
+        if self.last_face is not None:
+            x, y, w, h = self.last_face
             cv2.rectangle(img, (x, y), (x+w, y+h), self.box_color, 3)
             cv2.putText(img, self.current_name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.box_color, 2)
 
-            if self.ai_task is None or self.ai_task.done():
-                if self.ai_task and self.ai_task.done():
-                    result = self.ai_task.result()
-                    self.current_name = result
-                    self.box_color = (0, 255, 0) if result != "Unknown" else (0, 0, 255)
-
-                # Send just the cropped face to the AI thread
+            # If the AI thread is free, send it a fresh snapshot of the locked face
+            if self.ai_task is None:
                 rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 face_crop = rgb_img[y:y+h, x:x+w]
                 if face_crop.size > 0:
@@ -236,7 +260,6 @@ else:
                         cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
                         gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
                         
-                        # Use Haar Cascade to find the face in the uploaded photo
                         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
                         faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
                         
@@ -251,7 +274,6 @@ else:
                             face_crop = cv2.resize(face_crop, (160, 160))
                             face_crop = np.expand_dims(face_crop, axis=0)
                             
-                            # Generate encoding
                             encoding = embedder.embeddings(face_crop)[0]
                             st.session_state.known_names.append(new_name)
                             st.session_state.known_encodings.append(encoding)
@@ -266,6 +288,7 @@ else:
         if os.path.exists(paths["logs"]) and os.path.getsize(paths["logs"]) > 0:
             df = pd.read_csv(paths["logs"])
             st.dataframe(df.iloc[::-1], use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "logs.csv", "text/csv")
         else:
             st.info("No logs found.")
 
