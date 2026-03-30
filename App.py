@@ -1,14 +1,8 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import pickle
-import hashlib
 import os
-import concurrent.futures
-from datetime import datetime
-from deepface import DeepFace
-from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
-import av
+import sys
+import subprocess
+
+# --- 0. THE OPENCV HIJACKER ---
 # Catch the crash, uninstall the broken GUI version, and force the headless version
 try:
     import cv2
@@ -17,10 +11,22 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "opencv-python-headless"])
     subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python-headless"])
     import cv2
+
 # --- Prevent TensorFlow Memory Crashes ---
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import pickle
+import hashlib
+import concurrent.futures
+from datetime import datetime
+from deepface import DeepFace
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
+import av
 
 # --- 1. CONFIGURATION ---
 DATA_DIR = "agnos_data"
