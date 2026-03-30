@@ -1,6 +1,7 @@
 streamlit
 pandas
 numpy<2.0.0
+scipy
 tensorflow-cpu
 keras-facenet
 streamlit-webrtc
