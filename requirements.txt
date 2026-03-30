@@ -5,4 +5,3 @@ face_recognition
 streamlit-webrtc
 av
 opencv-python-headless
-#
