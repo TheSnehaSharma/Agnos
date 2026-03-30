@@ -6,7 +6,7 @@ import pickle
 import hashlib
 import os
 from datetime import datetime
-from streamlit_webrtc import webrtc_streamer, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 import av
 
 # --- 1. CONFIGURATION ---
@@ -163,7 +163,7 @@ else:
 
             webrtc_streamer(
                 key="simple-scanner",
-                mode=1,
+                mode=WebRtcMode.SENDRECV,
                 rtc_configuration=RTC_CONFIGURATION,
                 video_frame_callback=process_frame,
                 media_stream_constraints={"video": True, "audio": False},
