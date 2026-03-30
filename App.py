@@ -23,16 +23,15 @@ AUTH_FILE = os.path.join(DATA_DIR, "auth_registry.json")
 
 RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
-st.set_page_config(page_title="Agnos Enterprise", layout="wide")
+# Added the "Vigilance" Icon to the browser tab
+st.set_page_config(page_title="Agnos Enterprise", page_icon="👁️", layout="wide")
 
-# Initialize the pure-Python AI model (downloads weights on first boot)
 @st.cache_resource
 def get_embedder():
     return FaceNet()
 
 embedder = get_embedder()
 
-# Math helper for comparing faces
 def cosine_distance(a, b):
     a, b = np.array(a), np.array(b)
     if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0: return 1.0
@@ -52,7 +51,8 @@ def save_auth(data):
 def get_file_paths(org_key):
     return {
         "db": os.path.join(DATA_DIR, f"faces_{org_key}.pkl"),
-        "logs": os.path.join(DATA_DIR, f"logs_{org_key}.csv")
+        "logs": os.path.join(DATA_DIR, f"logs_{org_key}.csv"),
+        "thumbs": os.path.join(DATA_DIR, f"thumbs_{org_key}") # New thumbnail directory
     }
 
 # --- 3. SESSION STATE ---
@@ -65,6 +65,9 @@ def load_org_data(org_key):
     paths = get_file_paths(org_key)
     st.session_state.known_names = []
     st.session_state.known_encodings = []
+    
+    # Ensure thumbnail folder exists
+    if not os.path.exists(paths["thumbs"]): os.makedirs(paths["thumbs"])
     
     if os.path.exists(paths["db"]):
         try:
@@ -84,13 +87,10 @@ def log_attendance_thread_safe(name, org_key):
     paths = get_file_paths(org_key)
     csv_path = paths["logs"]
     
-    # Force the server to pull the exact time for the local device timezone
     local_tz = pytz.timezone('Asia/Kolkata') 
     now = datetime.now(local_tz)
-    
     date_str, time_str = now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
 
-    # Prevent spam logging the same person on the same day
     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
         with open(csv_path, "r") as f:
             if any(name in line and date_str in line for line in f): return
@@ -115,28 +115,24 @@ class AsyncFaceProcessor:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.ai_task = None
         
-        # State Tracking
         self.frame_count = 0
-        self.last_face = None # Stores the (x, y, w, h) of the single locked face
+        self.last_face = None 
         self.current_name = "Finding Match..."
         self.box_color = (0, 255, 255) 
         
-        # Database
         self.known_names = []
         self.known_encodings = []
         self.org_key = None
 
     def run_ai_in_background(self, face_crop):
         try:
-            # FaceNet requires exact 160x160 image
             face_crop = cv2.resize(face_crop, (160, 160))
-            face_crop = np.expand_dims(face_crop, axis=0) # Add batch dimension
+            face_crop = np.expand_dims(face_crop, axis=0) 
             
-            # Extract embedding
             encoding = embedder.embeddings(face_crop)[0]
             
             best_name = "Unknown"
-            best_dist = 0.40 # Distance threshold
+            best_dist = 0.40 
             
             for known_name, known_enc in zip(self.known_names, self.known_encodings):
                 dist = cosine_distance(encoding, known_enc)
@@ -155,20 +151,17 @@ class AsyncFaceProcessor:
         img = frame.to_ndarray(format="bgr24")
         self.frame_count += 1
 
-        # Check if the AI finished processing the previous snapshot
         if self.ai_task and self.ai_task.done():
             result = self.ai_task.result()
             self.current_name = result
             self.box_color = (0, 255, 0) if result != "Unknown" else (0, 0, 255)
-            self.ai_task = None # Free up the background thread
+            self.ai_task = None 
 
-        # OPTIMIZATION 1: Only scan for faces every 3rd frame
         if self.frame_count % 3 == 0:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
 
             if len(faces) > 0:
-                # OPTIMIZATION 2: If multiple faces, lock onto the largest one (closest to camera)
                 faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
                 self.last_face = faces[0]
             else:
@@ -176,13 +169,11 @@ class AsyncFaceProcessor:
                 self.current_name = "Finding Match..."
                 self.box_color = (0, 255, 255)
 
-        # Draw the tracking box if we have a locked face
         if self.last_face is not None:
             x, y, w, h = self.last_face
             cv2.rectangle(img, (x, y), (x+w, y+h), self.box_color, 3)
             cv2.putText(img, self.current_name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.box_color, 2)
 
-            # If the AI thread is free, send it a fresh snapshot of the locked face
             if self.ai_task is None:
                 rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 face_crop = rgb_img[y:y+h, x:x+w]
@@ -195,7 +186,7 @@ class AsyncFaceProcessor:
 if not st.session_state.auth_status:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        st.title("🔐 Agnos Login")
+        st.title("👁️ Agnos Security")
         key_in = st.text_input("Org Key (5 Char)", max_chars=5).upper()
         auth_db = load_auth()
         is_known = (len(key_in) == 5 and key_in in auth_db)
@@ -217,9 +208,9 @@ if not st.session_state.auth_status:
                     st.rerun()
 else:
     with st.sidebar:
-        st.title("🛡️ Agnos")
+        st.title("👁️ Agnos")
         st.caption(f"ORG: {st.session_state.org_key}")
-        st.metric("Users", len(st.session_state.known_names))
+        st.metric("Registered Users", len(st.session_state.known_names))
         st.markdown("---")
         if st.button("Log Out"):
             st.query_params.clear()
@@ -227,7 +218,7 @@ else:
             st.rerun()
 
     st.title("Agnos Enterprise")
-    tab1, tab2, tab3, tab4 = st.tabs(["🎥 Live Scanner", "👤 Register", "📊 Logs", "🗄️ Database"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🎥 Live Scanner", "👤 Register User", "📊 Access Logs", "🗄️ Database"])
 
     with tab1:
         st.markdown("### Facial Recognition System")
@@ -248,59 +239,100 @@ else:
             ctx.video_processor.org_key = st.session_state.org_key
 
     with tab2:
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            new_name = st.text_input("Employee Name").upper()
-            photo_file = st.camera_input("Take a photo") or st.file_uploader("Upload a photo", type=["jpg", "png", "jpeg"])
-            
-            if photo_file and new_name:
-                if st.button("Register User", type="primary"):
-                    with st.spinner("Extracting Facial Features..."):
-                        bytes_data = photo_file.getvalue()
-                        cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-                        gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
+        st.markdown("### Add New User")
+        new_name = st.text_input("Employee Name").upper()
+        st.markdown("---")
+        
+        # Side-by-Side Photo Options
+        c_cam, c_or, c_up = st.columns([4, 1, 4])
+        with c_cam:
+            cam_photo = st.camera_input("Take a photo")
+        with c_or:
+            st.markdown("<h3 style='text-align: center; margin-top: 50px; color: gray;'>OR</h3>", unsafe_allow_html=True)
+        with c_up:
+            up_photo = st.file_uploader("Upload a photo", type=["jpg", "png", "jpeg"])
+        
+        photo_file = cam_photo or up_photo
+        
+        if photo_file and new_name:
+            if st.button("Register User", type="primary", use_container_width=True):
+                with st.spinner("Extracting Facial Features..."):
+                    bytes_data = photo_file.getvalue()
+                    cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+                    gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
+                    
+                    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+                    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
+                    
+                    if len(faces) == 0:
+                        st.error("No face found! Please try again with better lighting.")
+                    elif len(faces) > 1:
+                        st.error("Multiple faces found! Please ensure only one person is in the frame.")
+                    else:
+                        x, y, w, h = faces[0]
+                        rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+                        face_crop_raw = rgb_img[y:y+h, x:x+w]
                         
-                        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-                        faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
+                        # Save the thumbnail to disk BEFORE expanding dimensions
+                        paths = get_file_paths(st.session_state.org_key)
+                        thumb_path = os.path.join(paths["thumbs"], f"{new_name}.jpg")
+                        cv2.imwrite(thumb_path, cv2.cvtColor(cv2.resize(face_crop_raw, (160, 160)), cv2.COLOR_RGB2BGR))
                         
-                        if len(faces) == 0:
-                            st.error("No face found! Please try again with better lighting.")
-                        elif len(faces) > 1:
-                            st.error("Multiple faces found! Please ensure only one person is in the frame.")
-                        else:
-                            x, y, w, h = faces[0]
-                            rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-                            face_crop = rgb_img[y:y+h, x:x+w]
-                            face_crop = cv2.resize(face_crop, (160, 160))
-                            face_crop = np.expand_dims(face_crop, axis=0)
-                            
-                            encoding = embedder.embeddings(face_crop)[0]
-                            st.session_state.known_names.append(new_name)
-                            st.session_state.known_encodings.append(encoding)
-                            save_face_data()
-                            st.success(f"Successfully registered {new_name}!")
-                            st.rerun()
+                        face_crop = cv2.resize(face_crop_raw, (160, 160))
+                        face_crop = np.expand_dims(face_crop, axis=0)
+                        
+                        encoding = embedder.embeddings(face_crop)[0]
+                        st.session_state.known_names.append(new_name)
+                        st.session_state.known_encodings.append(encoding)
+                        save_face_data()
+                        st.success(f"Successfully registered {new_name}!")
+                        st.rerun()
 
     with tab3:
         paths = get_file_paths(st.session_state.org_key)
-        if st.button("Refresh Logs"): load_org_data(st.session_state.org_key)
+        
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            if st.button("Refresh Logs"): load_org_data(st.session_state.org_key)
+        with c2:
+            # The Clear Logs button
+            if st.button("🗑️ Clear All Logs", type="secondary"):
+                if os.path.exists(paths["logs"]):
+                    os.remove(paths["logs"])
+                st.rerun()
         
         if os.path.exists(paths["logs"]) and os.path.getsize(paths["logs"]) > 0:
             df = pd.read_csv(paths["logs"])
+            df.index = df.index + 1 # Start table index at 1 instead of 0
             st.dataframe(df.iloc[::-1], use_container_width=True)
             st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "logs.csv", "text/csv")
         else:
             st.info("No logs found.")
 
     with tab4:
+        paths = get_file_paths(st.session_state.org_key)
         if st.session_state.known_names:
             for idx, name in enumerate(st.session_state.known_names):
-                c1, c2 = st.columns([3, 1])
-                c1.text(f"👤 {name}")
-                if c2.button("Delete", key=f"del_{idx}_{name}"):
-                    st.session_state.known_names.pop(idx)
-                    st.session_state.known_encodings.pop(idx)
-                    save_face_data()
-                    st.rerun()
+                c1, c2, c3 = st.columns([1, 3, 1])
+                
+                # Load the thumbnail from the hard drive
+                thumb_path = os.path.join(paths["thumbs"], f"{name}.jpg")
+                with c1:
+                    if os.path.exists(thumb_path):
+                        st.image(thumb_path, width=80)
+                    else:
+                        st.text("👤")
+                        
+                with c2:
+                    st.markdown(f"**{name}**")
+                    
+                with c3:
+                    if st.button("Delete", key=f"del_{idx}_{name}"):
+                        st.session_state.known_names.pop(idx)
+                        st.session_state.known_encodings.pop(idx)
+                        save_face_data()
+                        # Delete the photo file to keep the server clean
+                        if os.path.exists(thumb_path): os.remove(thumb_path)
+                        st.rerun()
         else:
             st.info("Database empty.")
