@@ -7,9 +7,13 @@ import hashlib
 import os
 import concurrent.futures
 from datetime import datetime
-import face_recognition
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 import av
+
+# --- Prevent TensorFlow Memory Crashes ---
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+from keras_facenet import FaceNet
 
 # --- 1. CONFIGURATION ---
 DATA_DIR = "agnos_data"
@@ -19,6 +23,19 @@ AUTH_FILE = os.path.join(DATA_DIR, "auth_registry.json")
 RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
 st.set_page_config(page_title="Agnos Enterprise", layout="wide")
+
+# Initialize the pure-Python AI model (downloads weights on first boot)
+@st.cache_resource
+def get_embedder():
+    return FaceNet()
+
+embedder = get_embedder()
+
+# Math helper for comparing faces
+def cosine_distance(a, b):
+    a, b = np.array(a), np.array(b)
+    if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0: return 1.0
+    return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 # --- 2. BACKEND HELPERS ---
 def load_auth():
@@ -42,13 +59,11 @@ if "auth_status" not in st.session_state: st.session_state.auth_status = False
 if "org_key" not in st.session_state: st.session_state.org_key = None
 if "known_names" not in st.session_state: st.session_state.known_names = []
 if "known_encodings" not in st.session_state: st.session_state.known_encodings = []
-if "logged_set" not in st.session_state: st.session_state.logged_set = set()
 
 def load_org_data(org_key):
     paths = get_file_paths(org_key)
     st.session_state.known_names = []
     st.session_state.known_encodings = []
-    st.session_state.logged_set = set()
     
     if os.path.exists(paths["db"]):
         try:
@@ -57,13 +72,6 @@ def load_org_data(org_key):
                 st.session_state.known_names = data.get("names", [])
                 st.session_state.known_encodings = data.get("encodings", [])
         except EOFError: pass
-    
-    if os.path.exists(paths["logs"]) and os.path.getsize(paths["logs"]) > 0:
-        try:
-            df = pd.read_csv(paths["logs"])
-            today = datetime.now().strftime("%Y-%m-%d")
-            st.session_state.logged_set = set(df[df['Date'] == today]['Name'].unique())
-        except Exception: pass
 
 def save_face_data():
     paths = get_file_paths(st.session_state.org_key)
@@ -97,50 +105,44 @@ if not st.session_state.auth_status and "org" in st.query_params and "token" in 
 # --- 4. WEBRTC THREAD PROCESSOR ---
 class AsyncFaceProcessor:
     def __init__(self):
-        # 1. Fast Tracker (Haar Cascade)
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        
-        # 2. Background AI Thread Manager
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.ai_task = None
-        
-        # 3. State Variables
         self.current_name = "Finding Match..."
-        self.box_color = (0, 255, 255) # Yellow
+        self.box_color = (0, 255, 255) 
         self.known_names = []
         self.known_encodings = []
         self.org_key = None
 
-    def run_ai_in_background(self, rgb_img, face_location):
+    def run_ai_in_background(self, face_crop):
         try:
-            # face_recognition takes location as (top, right, bottom, left)
-            encodings = face_recognition.face_encodings(rgb_img, known_face_locations=[face_location])
+            # FaceNet requires exact 160x160 image
+            face_crop = cv2.resize(face_crop, (160, 160))
+            face_crop = np.expand_dims(face_crop, axis=0) # Add batch dimension
             
-            if not encodings:
-                return "Unknown"
-                
-            encoding = encodings[0]
+            # Extract embedding
+            encoding = embedder.embeddings(face_crop)[0]
+            
             best_name = "Unknown"
+            best_dist = 0.40 # Distance threshold
             
-            if self.known_encodings:
-                # Calculate distances to all known faces
-                face_distances = face_recognition.face_distance(self.known_encodings, encoding)
-                best_match_index = np.argmin(face_distances)
-                
-                # Tolerance 0.5 is strict (default is 0.6)
-                if face_distances[best_match_index] < 0.5:
-                    best_name = self.known_names[best_match_index]
-                    log_attendance_thread_safe(best_name, self.org_key)
+            for known_name, known_enc in zip(self.known_names, self.known_encodings):
+                dist = cosine_distance(encoding, known_enc)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_name = known_name
                     
+            if best_name != "Unknown":
+                log_attendance_thread_safe(best_name, self.org_key)
+                
             return best_name
-        except Exception as e:
+        except Exception:
             return "Unknown"
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # FAST: Detect face instantly using OpenCV
         faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
 
         if len(faces) == 0:
@@ -151,17 +153,17 @@ class AsyncFaceProcessor:
             cv2.rectangle(img, (x, y), (x+w, y+h), self.box_color, 3)
             cv2.putText(img, self.current_name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.box_color, 2)
 
-            # SLOW: Background thread processing
             if self.ai_task is None or self.ai_task.done():
                 if self.ai_task and self.ai_task.done():
                     result = self.ai_task.result()
                     self.current_name = result
                     self.box_color = (0, 255, 0) if result != "Unknown" else (0, 0, 255)
 
-                # Convert to RGB and send coordinates (top, right, bottom, left)
+                # Send just the cropped face to the AI thread
                 rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                face_location = (y, x+w, y+h, x) 
-                self.ai_task = self.executor.submit(self.run_ai_in_background, rgb_img, face_location)
+                face_crop = rgb_img[y:y+h, x:x+w]
+                if face_crop.size > 0:
+                    self.ai_task = self.executor.submit(self.run_ai_in_background, face_crop)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -232,22 +234,29 @@ else:
                     with st.spinner("Extracting Facial Features..."):
                         bytes_data = photo_file.getvalue()
                         cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-                        rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+                        gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
                         
-                        # Find faces using face_recognition
-                        face_locations = face_recognition.face_locations(rgb_img)
+                        # Use Haar Cascade to find the face in the uploaded photo
+                        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+                        faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
                         
-                        if len(face_locations) == 0:
+                        if len(faces) == 0:
                             st.error("No face found! Please try again with better lighting.")
-                        elif len(face_locations) > 1:
+                        elif len(faces) > 1:
                             st.error("Multiple faces found! Please ensure only one person is in the frame.")
                         else:
+                            x, y, w, h = faces[0]
+                            rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+                            face_crop = rgb_img[y:y+h, x:x+w]
+                            face_crop = cv2.resize(face_crop, (160, 160))
+                            face_crop = np.expand_dims(face_crop, axis=0)
+                            
                             # Generate encoding
-                            encoding = face_recognition.face_encodings(rgb_img, known_face_locations=face_locations)[0]
+                            encoding = embedder.embeddings(face_crop)[0]
                             st.session_state.known_names.append(new_name)
                             st.session_state.known_encodings.append(encoding)
                             save_face_data()
-                            st.success(f"Successfully registered {new_name}! Their face data has been encrypted and saved.")
+                            st.success(f"Successfully registered {new_name}!")
                             st.rerun()
 
     with tab3:
@@ -257,7 +266,6 @@ else:
         if os.path.exists(paths["logs"]) and os.path.getsize(paths["logs"]) > 0:
             df = pd.read_csv(paths["logs"])
             st.dataframe(df.iloc[::-1], use_container_width=True)
-            st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "logs.csv", "text/csv")
         else:
             st.info("No logs found.")
 
