@@ -23,7 +23,6 @@ AUTH_FILE = os.path.join(DATA_DIR, "auth_registry.json")
 
 RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
-# Added the "Vigilance" Icon to the browser tab
 st.set_page_config(page_title="Agnos Enterprise", page_icon="👁️", layout="wide")
 
 @st.cache_resource
@@ -51,8 +50,7 @@ def save_auth(data):
 def get_file_paths(org_key):
     return {
         "db": os.path.join(DATA_DIR, f"faces_{org_key}.pkl"),
-        "logs": os.path.join(DATA_DIR, f"logs_{org_key}.csv"),
-        "thumbs": os.path.join(DATA_DIR, f"thumbs_{org_key}") # New thumbnail directory
+        "logs": os.path.join(DATA_DIR, f"logs_{org_key}.csv")
     }
 
 # --- 3. SESSION STATE ---
@@ -65,9 +63,6 @@ def load_org_data(org_key):
     paths = get_file_paths(org_key)
     st.session_state.known_names = []
     st.session_state.known_encodings = []
-    
-    # Ensure thumbnail folder exists
-    if not os.path.exists(paths["thumbs"]): os.makedirs(paths["thumbs"])
     
     if os.path.exists(paths["db"]):
         try:
@@ -243,7 +238,6 @@ else:
         new_name = st.text_input("Employee Name").upper()
         st.markdown("---")
         
-        # Side-by-Side Photo Options
         c_cam, c_or, c_up = st.columns([4, 1, 4])
         with c_cam:
             cam_photo = st.camera_input("Take a photo")
@@ -271,14 +265,8 @@ else:
                     else:
                         x, y, w, h = faces[0]
                         rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-                        face_crop_raw = rgb_img[y:y+h, x:x+w]
-                        
-                        # Save the thumbnail to disk BEFORE expanding dimensions
-                        paths = get_file_paths(st.session_state.org_key)
-                        thumb_path = os.path.join(paths["thumbs"], f"{new_name}.jpg")
-                        cv2.imwrite(thumb_path, cv2.cvtColor(cv2.resize(face_crop_raw, (160, 160)), cv2.COLOR_RGB2BGR))
-                        
-                        face_crop = cv2.resize(face_crop_raw, (160, 160))
+                        face_crop = rgb_img[y:y+h, x:x+w]
+                        face_crop = cv2.resize(face_crop, (160, 160))
                         face_crop = np.expand_dims(face_crop, axis=0)
                         
                         encoding = embedder.embeddings(face_crop)[0]
@@ -295,7 +283,6 @@ else:
         with c1:
             if st.button("Refresh Logs"): load_org_data(st.session_state.org_key)
         with c2:
-            # The Clear Logs button
             if st.button("🗑️ Clear All Logs", type="secondary"):
                 if os.path.exists(paths["logs"]):
                     os.remove(paths["logs"])
@@ -303,36 +290,26 @@ else:
         
         if os.path.exists(paths["logs"]) and os.path.getsize(paths["logs"]) > 0:
             df = pd.read_csv(paths["logs"])
-            df.index = df.index + 1 # Start table index at 1 instead of 0
+            df.index = df.index + 1
             st.dataframe(df.iloc[::-1], use_container_width=True)
             st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "logs.csv", "text/csv")
         else:
             st.info("No logs found.")
 
     with tab4:
-        paths = get_file_paths(st.session_state.org_key)
         if st.session_state.known_names:
             for idx, name in enumerate(st.session_state.known_names):
-                c1, c2, c3 = st.columns([1, 3, 1])
+                c1, c2 = st.columns([4, 1])
                 
-                # Load the thumbnail from the hard drive
-                thumb_path = os.path.join(paths["thumbs"], f"{name}.jpg")
                 with c1:
-                    if os.path.exists(thumb_path):
-                        st.image(thumb_path, width=80)
-                    else:
-                        st.text("👤")
-                        
-                with c2:
-                    st.markdown(f"**{name}**")
+                    # Added the +1 so your database correctly starts at 1 instead of 0
+                    st.markdown(f"**{idx + 1}. {name}**")
                     
-                with c3:
+                with c2:
                     if st.button("Delete", key=f"del_{idx}_{name}"):
                         st.session_state.known_names.pop(idx)
                         st.session_state.known_encodings.pop(idx)
                         save_face_data()
-                        # Delete the photo file to keep the server clean
-                        if os.path.exists(thumb_path): os.remove(thumb_path)
                         st.rerun()
         else:
             st.info("Database empty.")
