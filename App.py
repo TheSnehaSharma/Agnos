@@ -10,20 +10,21 @@ from datetime import datetime
 import pytz
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 import av
+import json
 
 # --- Prevent TensorFlow Memory Crashes ---
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from keras_facenet import FaceNet
 
-# --- 1. CONFIGURATION ---
+# --- CONFIGURATION ---
 DATA_DIR = "agnos_data"
 if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 AUTH_FILE = os.path.join(DATA_DIR, "auth_registry.json")
 
 RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
-st.set_page_config(page_title="Agnos Enterprise", page_icon="👁️", layout="wide")
+st.set_page_config(page_title="Agnos", page_icon="👁️", layout="wide")
 
 @st.cache_resource
 def get_embedder():
@@ -33,19 +34,20 @@ embedder = get_embedder()
 
 def cosine_distance(a, b):
     a, b = np.array(a), np.array(b)
-    if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0: return 1.0
+    if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0: 
+        return 1.0
     return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# --- 2. BACKEND HELPERS ---
+# --- BACKEND HELPERS ---
 def load_auth():
     if os.path.exists(AUTH_FILE):
-        import json
-        with open(AUTH_FILE, "r") as f: return json.load(f)
+        with open(AUTH_FILE, "r") as f: 
+            return json.load(f)
     return {}
 
 def save_auth(data):
-    import json
-    with open(AUTH_FILE, "w") as f: json.dump(data, f)
+    with open(AUTH_FILE, "w") as f: 
+        json.dump(data, f)
 
 def get_file_paths(org_key):
     return {
@@ -53,7 +55,7 @@ def get_file_paths(org_key):
         "logs": os.path.join(DATA_DIR, f"logs_{org_key}.csv")
     }
 
-# --- 3. SESSION STATE ---
+# --- SESSION STATE ---
 if "auth_status" not in st.session_state: st.session_state.auth_status = False
 if "org_key" not in st.session_state: st.session_state.org_key = None
 if "known_names" not in st.session_state: st.session_state.known_names = []
@@ -77,7 +79,7 @@ def save_face_data():
     with open(paths["db"], "wb") as f:
         pickle.dump({"names": st.session_state.known_names, "encodings": st.session_state.known_encodings}, f)
 
-def log_attendance_thread_safe(name, org_key):
+def log_attendance(name, org_key):
     if name == "Unknown": return
     paths = get_file_paths(org_key)
     csv_path = paths["logs"]
@@ -103,7 +105,7 @@ if not st.session_state.auth_status and "org" in st.query_params and "token" in 
         st.session_state.auth_status, st.session_state.org_key = True, q_org
         load_org_data(q_org)
 
-# --- 4. WEBRTC THREAD PROCESSOR ---
+# --- WEBRTC THREAD PROCESSOR ---
 class AsyncFaceProcessor:
     def __init__(self):
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -119,7 +121,7 @@ class AsyncFaceProcessor:
         self.known_encodings = []
         self.org_key = None
 
-    def run_ai_in_background(self, face_crop):
+    def recognize_face(self, face_crop):
         try:
             face_crop = cv2.resize(face_crop, (160, 160))
             face_crop = np.expand_dims(face_crop, axis=0) 
@@ -136,9 +138,10 @@ class AsyncFaceProcessor:
                     best_name = known_name
                     
             if best_name != "Unknown":
-                log_attendance_thread_safe(best_name, self.org_key)
+                log_attendance(best_name, self.org_key)
                 
             return best_name
+            
         except Exception:
             return "Unknown"
 
@@ -173,16 +176,16 @@ class AsyncFaceProcessor:
                 rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 face_crop = rgb_img[y:y+h, x:x+w]
                 if face_crop.size > 0:
-                    self.ai_task = self.executor.submit(self.run_ai_in_background, face_crop)
+                    self.ai_task = self.executor.submit(self.recognize_face, face_crop)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- 5. UI START ---
+# --- UI START ---
 if not st.session_state.auth_status:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        st.title("👁️ Agnos Security")
-        key_in = st.text_input("Org Key (5 Char)", max_chars=5).upper()
+        st.title("👁️ Agnos Login")
+        key_in = st.text_input("Org Key", max_chars=5).upper()
         auth_db = load_auth()
         is_known = (len(key_in) == 5 and key_in in auth_db)
         
@@ -212,8 +215,8 @@ else:
             for k in list(st.session_state.keys()): del st.session_state[k]
             st.rerun()
 
-    st.title("Agnos Enterprise")
-    tab1, tab2, tab3, tab4 = st.tabs(["🎥 Live Scanner", "👤 Register User", "📊 Access Logs", "🗄️ Database"])
+    st.title("Agnos")
+    tab1, tab2, tab3, tab4 = st.tabs(["🎥 Live Scanner", "👤 Register Face", "📊 Access Logs", "🗄️ Manage Database"])
 
     with tab1:
         st.markdown("### Facial Recognition System")
@@ -235,7 +238,7 @@ else:
 
     with tab2:
         st.markdown("### Add New User")
-        new_name = st.text_input("Employee Name").upper()
+        new_name = st.text_input("Name").upper()
         st.markdown("---")
         
         c_cam, c_or, c_up = st.columns([4, 1, 4])
@@ -302,7 +305,6 @@ else:
                 c1, c2 = st.columns([4, 1])
                 
                 with c1:
-                    # Added the +1 so your database correctly starts at 1 instead of 0
                     st.markdown(f"**{idx + 1}. {name}**")
                     
                 with c2:
