@@ -209,10 +209,10 @@ else:
         st.title("👁️ AGNOS")
         st.caption(f"ORG: {st.session_state.org_key}")
         st.metric("Registered Users", len(st.session_state.known_names))
-        
+
+        st.markdown("---")
         with st.expander("Forgot Password"):
             with st.form("reset_pwd_form"):
-                st.info("Override the password for this workspace.")
                 new_pwd = st.text_input("New Password", type="password")
                 confirm_pwd = st.text_input("Confirm New Password", type="password")
                 
