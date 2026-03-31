@@ -6,6 +6,8 @@
 
 **Agnos** is a lightweight, cloud-ready facial recognition system built for secure facility access and automated attendance logging. It transforms any standard webcam into a biometric scanner, processing video feeds in real-time to identify registered users and log their entry.
 
+Visit Website Live at [Agnos AI](https://agnos-ai.streamlit.app/).
+
 ## ✨ Key Features
 
 * **Real-Time Biometric Scanning:** Processes live webcam feeds asynchronously using WebRTC, providing immediate visual feedback (Green = Verified, Red = Unknown).
@@ -43,12 +45,12 @@
 
 ## 🤝 Contributing
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/yourusername/agnos-enterprise/issues).
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/thesnehasharma/Agnos/issues).
 
 1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
+2. Create your Feature Branch (`git checkout -b feature/NewFeature`)
+3. Commit your Changes (`git commit -m 'Added a NewFeature'`)
+4. Push to the Branch (`git push origin feature/NewFeature`)
 5. Open a Pull Request
 
 ## 📝 License
