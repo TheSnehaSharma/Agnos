@@ -184,13 +184,13 @@ class AsyncFaceProcessor:
 if not st.session_state.auth_status:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        st.title("👁️ Agnos Login")
+        st.title("👁️ AGNOS LOGIN")
         key_in = st.text_input("Org Key", max_chars=5).upper()
         auth_db = load_auth()
         is_known = (len(key_in) == 5 and key_in in auth_db)
         
         with st.form("auth"):
-            btn = "Sign In" if is_known else "Create Account"
+            btn = "Sign In / Sign Up"
             pw = st.text_input("Password", type="password")
             if st.form_submit_button(btn, type="primary"):
                 h_pw = hashlib.sha256(pw.encode()).hexdigest()
@@ -206,9 +206,27 @@ if not st.session_state.auth_status:
                     st.rerun()
 else:
     with st.sidebar:
-        st.title("👁️ Agnos")
+        st.title("👁️ AGNOS")
         st.caption(f"ORG: {st.session_state.org_key}")
         st.metric("Registered Users", len(st.session_state.known_names))
+        
+        with st.expander("Forgot Password"):
+            with st.form("reset_pwd_form"):
+                st.info("Override the password for this workspace.")
+                new_pwd = st.text_input("New Password", type="password")
+                confirm_pwd = st.text_input("Confirm New Password", type="password")
+                
+                if st.form_submit_button("Reset Password", use_container_width=True):
+                    if new_pwd != confirm_pwd:
+                        st.error("Passwords do not match. Try again.")
+                    else:
+                        auth_db = load_auth()
+                        new_hash = hashlib.sha256(new_pwd.encode()).hexdigest()
+                        auth_db[st.session_state.org_key] = new_hash
+                        save_auth(auth_db)
+                        st.query_params["token"] = new_hash
+                        st.success("Password successfully reset!")
+
         st.markdown("---")
         if st.button("Log Out"):
             st.query_params.clear()
