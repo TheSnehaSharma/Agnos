@@ -215,7 +215,6 @@ else:
             for k in list(st.session_state.keys()): del st.session_state[k]
             st.rerun()
 
-    st.title("Agnos")
     tab1, tab2, tab3, tab4 = st.tabs(["🎥 Live Scanner", "👤 Register Face", "📊 Access Logs", "🗄️ Manage Database"])
 
     with tab1:
