@@ -30,7 +30,7 @@ Visit Website Live at [Agnos AI](https://agnos-ai.streamlit.app/).
 
 ## 📖 Usage Guide
 
-1. **Login/Create Workspace:** On launch, enter a 5-character **Org Key** (e.g., `SUDO`) and a password. If the key doesn't exist, it will create a new isolated workspace.
+1. **Login/Create Workspace:** Enter a 5-character **Org Key** and a password. If the key doesn't exist, it will create a new isolated workspace.
 ![Agnos Login](<imgs/Screenshot 2026-03-31 145432.png>)
 3. **Register Face:** Navigate to the **👤 Register Face** tab. Enter a name and provide a clear, front-facing photo via webcam or file upload.
 ![Register Face](<imgs/Screenshot 2026-03-31 150748.png>)
@@ -40,6 +40,20 @@ Visit Website Live at [Agnos AI](https://agnos-ai.streamlit.app/).
 ![Access Logs](<imgs/Screenshot 2026-03-31 151314.png>)
 9. **Manage Database:** Use the **🗄️ Manage Database** tab to view all registered personnel or delete biometric profiles from the system.
 ![Manage Database](<imgs/Screenshot 2026-03-31 151022.png>)
+
+---
+
+## 📊 System Performance & Telemetry
+
+Agnos is optimized for real-time video processing in cloud environments. By decoupling heavy Keras-FaceNet AI inference from the main Streamlit UI via asynchronous WebRTC pipelines, the system eliminates rendering bottlenecks.
+
+| Metric | Performance | Description | Telemetry |
+| :--- | :--- | :--- | :--- |
+| **Throughput** | **28 - 30 FPS** | Sustained real-time rendering; AI does not block the UI thread. | ![FPS](<imgs/FramesPerSecond.png>) |
+| **Round Trip Time** | **~250 ms** | End-to-end network latency (Webcam ➔ Server ➔ UI). | ![RTT](<imgs/CurrentRoundTripTime.png>) |
+| **Network Jitter** | **20 - 40 ms** | Minimal packet variance, ensuring a stutter-free video feed. | ![Jitter](<imgs/jitter.png>) |
+| **Encode Time** | **5 - 10 ms** | Efficient compression of outgoing processed frames. | ![Encode](<imgs/EncodeTimePerFrameEncoded.png>) |
+| **Decode Time** | **< 5 ms** | Rapid decompression of incoming video prior to AI analysis. | ![Decode](<imgs/DecodeTimePerFrameDecoded.png>) |
 
 ---
 
