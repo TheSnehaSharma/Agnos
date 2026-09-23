@@ -66,12 +66,6 @@ embedder = get_embedder()
 # ============================================================
 
 def get_db_connection():
-    """
-    Creates a new SQLite connection for each operation/thread.
-
-    This is important because WebRTC recognition runs in a
-    background thread.
-    """
     conn = sqlite3.connect(
         DB_FILE,
         timeout=30,
@@ -168,12 +162,6 @@ PBKDF2_ITERATIONS = 310_000
 
 
 def hash_password(password):
-    """
-    PBKDF2-HMAC-SHA256 with a random salt.
-
-    Much safer than storing raw SHA-256(password).
-    """
-
     salt = secrets.token_bytes(16)
 
     password_hash = hashlib.pbkdf2_hmac(
@@ -191,10 +179,6 @@ def hash_password(password):
 
 
 def verify_password(password, stored_hash):
-    """
-    Verifies a PBKDF2 password hash.
-    """
-
     try:
         salt_hex, hash_hex = stored_hash.split(":")
 
@@ -239,13 +223,6 @@ def get_organization(org_key):
 
 
 def create_organization(org_key, password):
-    """
-    Creates a new organization.
-
-    The session token is intentionally different from the
-    password hash.
-    """
-
     password_hash = hash_password(password)
     session_token = secrets.token_urlsafe(32)
 
@@ -298,12 +275,6 @@ def authenticate_with_password(org_key, password):
 
 
 def authenticate_with_token(org_key, token):
-    """
-    Authenticates using a random session token.
-
-    The password hash is never exposed as the URL token.
-    """
-
     conn = get_db_connection()
 
     try:
@@ -325,10 +296,6 @@ def authenticate_with_token(org_key, token):
 
 
 def reset_password(org_key, new_password):
-    """
-    Changes password and rotates the session token.
-    """
-
     new_password_hash = hash_password(new_password)
     new_token = secrets.token_urlsafe(32)
 
@@ -366,10 +333,6 @@ def reset_password(org_key, new_password):
 # ============================================================
 
 def encode_embedding(encoding):
-    """
-    Converts a numpy embedding into a compact binary representation.
-    """
-
     array = np.asarray(
         encoding,
         dtype=np.float32
@@ -379,10 +342,6 @@ def encode_embedding(encoding):
 
 
 def decode_embedding(blob, dimension):
-    """
-    Converts the database BLOB back into a numpy embedding.
-    """
-
     return np.frombuffer(
         blob,
         dtype=np.float32,
@@ -391,10 +350,6 @@ def decode_embedding(blob, dimension):
 
 
 def load_org_data(org_key):
-    """
-    Loads all registered faces for an organization.
-    """
-
     organization = get_organization(org_key)
 
     if organization is None:
@@ -433,7 +388,6 @@ def load_org_data(org_key):
             encodings.append(encoding)
 
         except Exception:
-            # Skip corrupted embeddings rather than crashing
             continue
 
     return names, encodings
@@ -444,9 +398,6 @@ def save_face(
     name,
     encoding
 ):
-    """
-    Inserts a face into the database.
-    """
 
     organization = get_organization(org_key)
 
@@ -492,10 +443,6 @@ def save_face(
 
 
 def delete_face(org_key, face_index):
-    """
-    Deletes a face based on the current ordered database list.
-    """
-
     organization = get_organization(org_key)
 
     if organization is None:
@@ -538,13 +485,6 @@ def delete_face(org_key, face_index):
 # ============================================================
 
 def log_attendance(name, org_key):
-    """
-    Records attendance exactly once per person per day.
-
-    The UNIQUE constraint in SQLite prevents race-condition
-    duplicates.
-    """
-
     if not name or name == "Unknown":
         return False
 
@@ -592,10 +532,6 @@ def log_attendance(name, org_key):
 
 
 def load_attendance(org_key):
-    """
-    Loads attendance records for the organization.
-    """
-
     organization = get_organization(org_key)
 
     if organization is None:
@@ -665,12 +601,6 @@ def clear_attendance(org_key):
 # ============================================================
 
 def cosine_distance(a, b):
-    """
-    Calculates cosine distance.
-
-    Lower value = more similar.
-    """
-
     a = np.asarray(a, dtype=np.float32)
     b = np.asarray(b, dtype=np.float32)
 
@@ -807,8 +737,6 @@ class AsyncFaceProcessor:
 
             best_name = "Unknown"
 
-            # Existing threshold retained so recognition
-            # behavior is not unexpectedly changed.
             best_dist = 0.40
 
             names = self.known_names
@@ -846,16 +774,11 @@ class AsyncFaceProcessor:
                     )
 
                 except Exception:
-                    # Recognition should not crash if logging
-                    # encounters a transient database problem.
                     pass
 
             return best_name
 
         except Exception:
-
-            # Do not expose internal processing errors to the
-            # WebRTC thread.
             return "Unknown"
 
     def recv(self, frame: av.VideoFrame):
@@ -923,7 +846,6 @@ class AsyncFaceProcessor:
 
             if len(faces) > 0:
 
-                # Largest face
                 faces = sorted(
                     faces,
                     key=lambda f: f[2] * f[3],
@@ -1044,9 +966,6 @@ if not st.session_state.auth_status:
                 type="primary"
             ):
 
-                # --------------------------------------------
-                # Basic input validation
-                # --------------------------------------------
 
                 if len(key_in) != 5:
 
@@ -1093,10 +1012,6 @@ if not st.session_state.auth_status:
                                 st.session_state.known_names,
                                 st.session_state.known_encodings
                             ) = load_org_data(key_in)
-
-                            # --------------------------------
-                            # Password hash is NOT put in URL.
-                            # --------------------------------
 
                             st.query_params[
                                 "org"
@@ -1209,7 +1124,6 @@ else:
                                 new_pwd
                             )
 
-                            # Rotate the authentication token.
                             st.query_params[
                                 "token"
                             ] = new_token
@@ -1460,9 +1374,6 @@ else:
                                         )[0]
                                     )
 
-                                    # --------------------------------
-                                    # Save to SQLite
-                                    # --------------------------------
 
                                     save_face(
                                         st.session_state.org_key,
@@ -1470,9 +1381,6 @@ else:
                                         encoding
                                     )
 
-                                    # --------------------------------
-                                    # Refresh session data
-                                    # --------------------------------
 
                                     (
                                         st.session_state.known_names,
