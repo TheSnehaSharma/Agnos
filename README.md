@@ -12,7 +12,7 @@ Visit Website Live at [Agnos AI](https://agnos-ai.streamlit.app/).
 
 * **Real-Time Biometric Scanning:** Processes live webcam feeds asynchronously using WebRTC, providing immediate visual feedback (Green = Verified, Red = Unknown).
 * **Frictionless Registration:** Add new employees in seconds via a live webcam snapshot or file upload.
-* **Smart Attendance Logs:** Automatically records Name, Date, and Time to a CSV file. Includes built-in logic to prevent duplicate entries on the same day.
+* **Smart Attendance Logs:** Automatically records Name, Date, and Time to SQLite. Includes built-in logic to prevent duplicate entries on the same day.
 * **Multi-Tenant Architecture:** Secures data using a unique 5-character Organization Key (Org Key) and hashed passwords, completely isolating user databases and logs between different organizations.
 * **CPU-Friendly:** Explicitly configured to run without dedicated GPUs, making it easy to deploy on standard cloud instances.
 
@@ -24,7 +24,7 @@ Visit Website Live at [Agnos AI](https://agnos-ai.streamlit.app/).
 * **Live Video Streaming:** `streamlit-webrtc` & `av`
 * **Face Detection:** `OpenCV` (Haar Cascades)
 * **Facial Embeddings (AI):** `keras-facenet` (TensorFlow)
-* **Data Management:** `Pandas` (CSV logs), `Pickle` (Face encodings)
+* **Data Management:** `SQLite` (attendance logs & face embeddings), `Pandas` (CSV export)
 
 ---
 
